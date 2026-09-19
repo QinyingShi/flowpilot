@@ -12,23 +12,20 @@ updates:
           - react-dom
           - react-server-dom-webpack
         update-types:
-          - minor
           - patch
       vinext-runtime:
         patterns:
           - vinext
           - '@vitejs/plugin-rsc'
         update-types:
-          - minor
           - patch
       cloudflare-toolchain:
         patterns:
           - '@cloudflare/*'
           - wrangler
         update-types:
-          - minor
           - patch
-      frontend-minor-patch:
+      frontend-patch:
         patterns:
           - '*'
         exclude-patterns:
@@ -40,12 +37,12 @@ updates:
           - '@cloudflare/*'
           - wrangler
         update-types:
-          - minor
           - patch
     ignore:
       - dependency-name: '*'
         update-types:
           - version-update:semver-major
+          - version-update:semver-minor
   - package-ecosystem: pip
     directory: /backend
     schedule:
