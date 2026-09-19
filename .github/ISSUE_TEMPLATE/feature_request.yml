@@ -1,0 +1,28 @@
+name: 功能建议
+description: 提议一个有明确用户价值的改进
+title: '[Feature] '
+labels: [enhancement]
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 用户场景
+      description: 谁在什么情况下遇到了什么问题？
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果
+      description: 描述结果和验收标准，不必先限定实现方式。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已考虑的替代方案
+  - type: textarea
+    id: scope
+    attributes:
+      label: 数据、权限和集成影响
+      description: 是否涉及 Schema、角色权限、第三方系统或 AI 数据处理？

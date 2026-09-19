@@ -1,12 +1,19 @@
 {
-  "name": "sites-project",
+  "name": "flowpilot",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
+    "dev": "python3 scripts/dev.py",
+    "dev:web": "vinext dev",
+    "dev:api": "backend/.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload",
+    "dev:worker": "backend/.venv/bin/python -m backend.app.inspection_worker --poll-seconds 30",
+    "inspection:once": "backend/.venv/bin/python -m backend.app.inspection_worker --once",
+    "setup:api": "python3 -m venv backend/.venv && backend/.venv/bin/python -m pip install -r backend/requirements.txt",
+    "test:api": "backend/.venv/bin/python -m unittest tests/test_backend.py",
     "build": "vinext build",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint",

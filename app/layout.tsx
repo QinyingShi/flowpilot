@@ -13,9 +13,12 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL('https://flowpilot-pm-command-center.snug-pika-0038.chatgpt.site'),
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3001',
+  ),
   title: 'FlowPilot · AI 项目指挥中心',
-  description: '覆盖 WBS、里程碑、资源预算、进度风险与 AI 自动巡检的项目管理工作台',
+  description:
+    '覆盖 WBS、里程碑、资源负载、进度风险与 AI 自动巡检的项目管理工作台',
   openGraph: {
     title: 'FlowPilot AI 项目指挥中心',
     description: '让计划、资源与风险实时联动',

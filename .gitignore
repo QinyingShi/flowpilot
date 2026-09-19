@@ -28,6 +28,7 @@ yarn-error.log*
 
 # local environment
 .env*
+!.env.example
 
 # deployment and generated files
 .vercel
@@ -36,3 +37,13 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# Python backend
+/backend/.venv/
+/backend/data/*.db
+/backend/data/*.db-shm
+/backend/data/*.db-wal
+/backend/data/uploads/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]

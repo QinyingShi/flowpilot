@@ -1,0 +1,130 @@
+# FlowPilot
+
+FlowPilot 是一个面向软件研发团队的 AI 项目管理工作台。它把版本计划、WBS、里程碑、资源负载、风险、需求变更、会议与自动巡检放在同一个工作流中，并提供可回溯的计划基线和实际完成记录。
+
+> 当前版本：`0.1.0-alpha`。适合本地体验、产品验证和二次开发；在接入真实组织前，请先完成生产级身份认证、权限审计、第三方连接器联调和数据库迁移。
+
+![FlowPilot 项目概览](./public/og.png)
+
+## 已实现能力
+
+- 多版本项目概览、计划/实际/预测趋势和版本时间轴
+- WBS 列表与看板、父子任务、敏捷/瀑布模式、阻塞闭环
+- 里程碑、关键路径、计划基线、实际完成时间和历史回溯
+- 团队负载、成员能力画像、任务筛选和 AI 调配建议
+- 需求变更从创建、分析、审核、并入版本、实施到归档的闭环
+- 风险巡检、预警、处置建议、通知和审计记录
+- 会议预约、会议纪要、决策跟进和历史会议归档
+- 日报、周报、版本计划等项目报告
+- 本地开发身份切换、工作区成员、角色与项目级权限
+- Word、PDF、XMind、Axure 等需求材料的上传与任务拆分入口
+
+## 功能状态
+
+| 范围                                        | 当前状态                                                     |
+| ------------------------------------------- | ------------------------------------------------------------ |
+| 项目、版本、WBS、风险、变更、会议等核心流程 | 本地后端和 SQLite 可持久化使用                               |
+| AI 需求文档分析                             | 已接 OpenAI 服务端调用；需自行配置 API Key                   |
+| AI 巡检与建议                               | 规则巡检可运行；模型增强和业务规则仍需按团队校准             |
+| 飞书、钉钉、Git、Jira 等连接器              | 提供沙箱配置、测试和同步框架；真实生产连接仍需凭证与接口联调 |
+| 登录与身份切换                              | 本地开发身份切换可用；生产环境应接入企业 SSO/OIDC            |
+| 数据库                                      | 单机 SQLite 可用；多实例生产部署建议迁移 PostgreSQL          |
+| Sites / Cloudflare D1、R2                   | 保留部署结构和数据 Schema；当前完整业务仍以 Python API 为准  |
+
+## 架构
+
+```text
+浏览器
+  │
+  ▼
+Vinext / React 前端
+  │  /api/workspace 代理（携带当前用户与项目上下文）
+  ▼
+FastAPI 业务服务 ─── 自动巡检 Worker
+  │
+  ├── SQLite（项目业务数据）
+  ├── 本地上传目录（需求文档）
+  └── OpenAI / 第三方连接器（按需配置）
+```
+
+前端保留了 Sites 所需的 D1/R2 Schema，但本仓库当前最完整、经过测试的运行方式是 Vinext + FastAPI + SQLite。
+
+## 快速开始
+
+环境要求：
+
+- Node.js `22.13+`
+- Python `3.11+`
+
+安装依赖：
+
+```bash
+npm install
+npm run setup:api
+cp .env.example .env.local
+```
+
+启动前端、API 和巡检 Worker：
+
+```bash
+npm run dev
+```
+
+打开：
+
+- 工作台：<http://localhost:3001>
+- API 健康检查：<http://127.0.0.1:8000/health>
+- API 文档：<http://127.0.0.1:8000/docs>
+
+如果 `8000` 端口已被占用，通常说明 API 已经启动。先访问健康检查确认，不要重复启动同一服务。
+
+## 环境配置
+
+以 [`.env.example`](./.env.example) 为模板。生产环境至少需要：
+
+- 设置 `PROJECT_ENV=production`
+- 为前端代理和 API 配置相同的 `PROJECT_API_PROXY_SECRET`
+- 设置首位管理员 `PROJECT_BOOTSTRAP_ADMIN_EMAIL`
+- 保持成员模式为 `invite_only`
+- 将站点地址写入 `NEXT_PUBLIC_SITE_URL`
+- 如启用 AI 文档分析，安全地注入 `OPENAI_API_KEY`
+
+不要提交 `.env`、数据库、上传文件、第三方凭证或真实组织数据。`npm run dev` 会读取根目录的 `.env` 和 `.env.local`，已有系统环境变量优先。
+
+## 常用命令
+
+```bash
+npm run dev             # 同时启动前端、API 和巡检 Worker
+npm run dev:web         # 只启动前端
+npm run dev:api         # 只启动 API
+npm run dev:worker      # 只启动巡检 Worker
+npm run inspection:once # 执行一次巡检
+npm run test:api        # 后端测试
+npm run lint            # 前端静态检查
+npx tsc --noEmit        # TypeScript 类型检查
+npm run build           # 生产构建
+```
+
+## 数据与隐私
+
+- 默认数据库位于 `backend/data/project_command_center.db`，已被 Git 忽略。
+- 上传文件默认位于 `backend/data/uploads/`，已被 Git 忽略。
+- 开启 AI 分析后，选定的文档内容可能发送给所配置的模型服务商；部署方应先完成数据分级、脱敏、授权和留存策略。
+- 本地演示身份仅用于开发，不应作为生产认证方案。
+
+## 参与贡献
+
+请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md) 和 [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)。安全问题请按 [SECURITY.md](./SECURITY.md) 私下报告，不要直接创建公开 Issue。
+
+## 路线图
+
+- 生产级 OIDC/企业 SSO 与细粒度 RBAC
+- PostgreSQL 和对象存储适配
+- 飞书、钉钉、GitHub/GitLab、Jira 的真实双向同步
+- Webhook、幂等、失败重试和连接器可观测性
+- AI 评测集、建议反馈闭环和项目级知识库
+- E2E 测试、迁移工具和正式部署手册
+
+## 许可证
+
+本项目采用 [Apache License 2.0](./LICENSE) 开源许可证。
