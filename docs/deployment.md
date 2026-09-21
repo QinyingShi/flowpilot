@@ -9,6 +9,24 @@ FlowPilot 当前生产拓扑由两个部分组成：
 必须位于本机持久化磁盘。不要把 SQLite 文件放在临时文件系统、对象存储或不保证
 文件锁语义的网络文件系统中。需要多副本或高可用时，应先迁移 PostgreSQL。
 
+## 推荐托管方案：Render
+
+仓库根目录的 `render.yaml` 可创建一个 Docker Web Service，并挂载 1 GB `/data`
+持久盘。由于 Render 持久盘只能由单个服务实例访问，Blueprint 会把巡检调度器嵌入
+API 进程，而不是创建第二个 Worker 服务。该模式仍限定单实例；不要开启自动扩容。
+
+在 Render Dashboard 新建 Blueprint、选择此 GitHub 仓库后，部署前填写：
+
+- `PROJECT_BOOTSTRAP_ADMIN_EMAIL`：首位系统管理员的真实邮箱。
+- `PROJECT_CORS_ORIGINS`：最终 Sites 站点的 HTTPS Origin。
+
+GitHub 私有仓库连接和 AI 文档分析默认关闭。需要时再在服务 Environment 中增加
+`GIT_ACCESS_TOKEN` 或 `OPENAI_API_KEY`，避免首次部署被非必填凭证阻塞。
+
+`PROJECT_API_PROXY_SECRET` 由 Render 自动生成。首次创建后从 Render 环境变量中复制
+该值，作为 Sites 的同名 Secret。部署完成后访问 `/health/ready`，确认返回
+`{"status":"ok"}`。
+
 ## 1. 准备生产配置
 
 复制 `deploy/production.env.example` 为 `.env.production`，至少替换：
@@ -22,6 +40,9 @@ FlowPilot 当前生产拓扑由两个部分组成：
 相对数据库路径或非 HTTPS 来源时会直接拒绝启动。
 
 ## 2. 启动 API 与巡检 Worker
+
+以下 Compose 方案用于自托管服务器；Render 用户跳过本节。Compose 默认使用独立
+Worker，因此 `PROJECT_EMBED_INSPECTION_WORKER` 必须保持 `false`。
 
 ```bash
 cp deploy/production.env.example .env.production
@@ -59,3 +80,6 @@ curl https://api.example.com/health/ready
 
 恢复演练应验证：登录、项目列表、WBS、计划基线、实际里程碑、需求文档、Git 证据和
 巡检闭环记录均可读取。
+
+Render 会为持久盘创建每日快照，但仍建议定期导出应用级备份，并至少完成一次恢复
+演练。挂载持久盘会使部署期间存在短暂中断，这是当前 SQLite 单实例方案的已知限制。

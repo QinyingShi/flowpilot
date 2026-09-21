@@ -1,0 +1,49 @@
+services:
+  - type: web
+    name: flowpilot-api
+    runtime: docker
+    plan: 0.5c-512mb
+    dockerfilePath: ./Dockerfile.api
+    healthCheckPath: /health/ready
+    maxShutdownDelaySeconds: 30
+    disk:
+      name: flowpilot-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: PROJECT_ENV
+        value: production
+      - key: PROJECT_MEMBERSHIP_MODE
+        value: invite_only
+      - key: PROJECT_SEED_DEMO_DATA
+        value: "false"
+      - key: PROJECT_DB_PATH
+        value: /data/flowpilot.db
+      - key: PROJECT_UPLOAD_PATH
+        value: /data/uploads
+      - key: PROJECT_EMBED_INSPECTION_WORKER
+        value: "true"
+      - key: PROJECT_INSPECTION_POLL_SECONDS
+        value: "30"
+      - key: PROJECT_ACCESS_LOG
+        value: "true"
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
+      - key: PROJECT_API_PROXY_SECRET
+        generateValue: true
+      - key: PROJECT_BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: PROJECT_CORS_ORIGINS
+        sync: false
+      - key: GITHUB_API_VERSION
+        value: "2026-03-10"
+      - key: GITHUB_ALLOWED_HOSTS
+        value: api.github.com
+      - key: PROJECT_AI_REQUIREMENTS_ENABLED
+        value: "false"
+      - key: PROJECT_AI_MODEL
+        value: gpt-5.4-mini
+      - key: PROJECT_AI_TIMEOUT_SECONDS
+        value: "90"
+      - key: PROJECT_AI_PDF_DETAIL
+        value: auto

@@ -119,8 +119,9 @@ npm run build           # 生产构建
 部署到带持久化磁盘的容器环境。生产环境会校验代理密钥、首位管理员、成员策略、
 HTTPS 来源以及持久化路径，避免带着开发默认值启动。
 
-完整步骤见 [`docs/deployment.md`](./docs/deployment.md)。当前 SQLite 部署限定为单 API
-副本；需要水平扩容前应先迁移 PostgreSQL。
+完整步骤见 [`docs/deployment.md`](./docs/deployment.md)。仓库还提供 `render.yaml`，可用
+Render Blueprint 创建单服务 + 持久盘的托管后端，并在同一进程运行巡检调度器。当前
+SQLite 部署限定为单 API 副本；需要水平扩容前应先迁移 PostgreSQL。
 
 ## 数据与隐私
 

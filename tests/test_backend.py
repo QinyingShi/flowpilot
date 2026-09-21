@@ -26,6 +26,8 @@ class BackendDatabaseTests(unittest.TestCase):
         os.environ.pop("FORWARDED_ALLOW_IPS", None)
         os.environ.pop("PROJECT_ACCESS_LOG", None)
         os.environ.pop("PROJECT_SEED_DEMO_DATA", None)
+        os.environ.pop("PROJECT_EMBED_INSPECTION_WORKER", None)
+        os.environ.pop("PROJECT_INSPECTION_POLL_SECONDS", None)
         os.environ.pop("PORT", None)
         for name in (
             "FEISHU_APP_ID",
@@ -47,6 +49,24 @@ class BackendDatabaseTests(unittest.TestCase):
         ):
             os.environ.pop(name, None)
         self.temp_dir.cleanup()
+
+    def test_embedded_inspection_worker_configuration(self) -> None:
+        from backend.app.main import (
+            embedded_inspection_enabled,
+            inspection_poll_seconds,
+        )
+
+        self.assertFalse(embedded_inspection_enabled())
+        self.assertEqual(inspection_poll_seconds(), 30)
+
+        os.environ["PROJECT_EMBED_INSPECTION_WORKER"] = "true"
+        os.environ["PROJECT_INSPECTION_POLL_SECONDS"] = "1"
+        self.assertTrue(embedded_inspection_enabled())
+        self.assertEqual(inspection_poll_seconds(), 5)
+
+        os.environ["PROJECT_INSPECTION_POLL_SECONDS"] = "invalid"
+        with self.assertRaisesRegex(RuntimeError, "must be an integer"):
+            inspection_poll_seconds()
 
     def test_plan_and_milestone_history_persist(self) -> None:
         from backend.app.database import (
