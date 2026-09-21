@@ -35,6 +35,11 @@ jobs:
       - name: Test backend
         run: python -m unittest tests/test_backend.py
 
+      - name: Validate production container
+        run: |
+          FLOWPILOT_ENV_FILE=deploy/production.env.example docker compose -f compose.production.yml config --quiet
+          docker build -f Dockerfile.api -t flowpilot-api:ci .
+
       - name: Lint frontend
         run: npm run lint
 

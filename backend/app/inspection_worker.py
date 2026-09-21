@@ -9,6 +9,7 @@ from .database import (
     projects_due_for_inspection,
     run_project_inspection,
 )
+from .runtime import validate_runtime_configuration
 
 
 def run_due_projects() -> int:
@@ -33,6 +34,7 @@ def main() -> int:
     parser.add_argument("--once", action="store_true", help="run due inspections once")
     parser.add_argument("--poll-seconds", type=int, default=30)
     args = parser.parse_args()
+    validate_runtime_configuration()
     initialize_database()
     if args.once:
         run_due_projects()

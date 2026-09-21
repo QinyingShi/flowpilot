@@ -113,6 +113,15 @@ npx tsc --noEmit        # TypeScript 类型检查
 npm run build           # 生产构建
 ```
 
+## 生产部署
+
+仓库提供 `Dockerfile.api` 与 `compose.production.yml`，可将 FastAPI 和巡检 Worker
+部署到带持久化磁盘的容器环境。生产环境会校验代理密钥、首位管理员、成员策略、
+HTTPS 来源以及持久化路径，避免带着开发默认值启动。
+
+完整步骤见 [`docs/deployment.md`](./docs/deployment.md)。当前 SQLite 部署限定为单 API
+副本；需要水平扩容前应先迁移 PostgreSQL。
+
 ## 数据与隐私
 
 - 默认数据库位于 `backend/data/project_command_center.db`，已被 Git 忽略。

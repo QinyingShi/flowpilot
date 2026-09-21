@@ -1,0 +1,17 @@
+.git
+.github
+.next
+.vinext
+.wrangler
+dist
+node_modules
+backend/.venv
+backend/data
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.pyc
+__pycache__

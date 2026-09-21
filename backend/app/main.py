@@ -21,6 +21,7 @@ from .database import (
     append_sync_event,
     append_audit_log,
     create_project,
+    database_health,
     ensure_member,
     get_connector_config,
     initialize_database,
@@ -51,6 +52,7 @@ from .github_connector import (
     test_github_connection,
 )
 from .task_model import valid_task_hierarchy, valid_task_record
+from .runtime import validate_runtime_configuration
 
 
 VALID_VERSIONS = {"v0.9", "v1.0", "v1.1"}
@@ -174,6 +176,7 @@ def valid_meeting_minutes(meeting: dict[str, Any]) -> bool:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    validate_runtime_configuration()
     initialize_database()
     yield
 
@@ -200,7 +203,20 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "database": "sqlite"}
+    try:
+        return database_health()
+    except (OSError, RuntimeError, sqlite3.Error) as error:
+        raise HTTPException(status_code=503, detail="database_unavailable") from error
+
+
+@app.get("/health/live")
+def liveness() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/health/ready")
+def readiness() -> dict[str, str]:
+    return health()
 
 
 @app.get("/api/workspace")

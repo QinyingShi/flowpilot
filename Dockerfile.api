@@ -1,0 +1,31 @@
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PROJECT_ENV=production \
+    PROJECT_MEMBERSHIP_MODE=invite_only \
+    PROJECT_DB_PATH=/data/flowpilot.db \
+    PROJECT_UPLOAD_PATH=/data/uploads \
+    PORT=8000
+
+WORKDIR /app
+
+RUN addgroup --system flowpilot \
+    && adduser --system --ingroup flowpilot --home /app flowpilot \
+    && mkdir -p /data/uploads \
+    && chown -R flowpilot:flowpilot /app /data
+
+COPY --chown=flowpilot:flowpilot backend/requirements.txt /app/backend/requirements.txt
+RUN python -m pip install --no-cache-dir --disable-pip-version-check \
+    -r /app/backend/requirements.txt
+
+COPY --chown=flowpilot:flowpilot backend /app/backend
+
+USER flowpilot
+EXPOSE 8000
+VOLUME ["/data"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["python", "-c", "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3))['status'] == 'ok'"]
+
+CMD ["python", "-m", "backend.app.production"]
