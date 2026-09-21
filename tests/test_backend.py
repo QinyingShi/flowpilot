@@ -22,6 +22,11 @@ class BackendDatabaseTests(unittest.TestCase):
         os.environ.pop("PROJECT_MEMBERSHIP_MODE", None)
         os.environ.pop("PROJECT_BOOTSTRAP_ADMIN_EMAIL", None)
         os.environ.pop("PROJECT_UPLOAD_PATH", None)
+        os.environ.pop("PROJECT_CORS_ORIGINS", None)
+        os.environ.pop("FORWARDED_ALLOW_IPS", None)
+        os.environ.pop("PROJECT_ACCESS_LOG", None)
+        os.environ.pop("PROJECT_SEED_DEMO_DATA", None)
+        os.environ.pop("PORT", None)
         for name in (
             "FEISHU_APP_ID",
             "FEISHU_APP_SECRET",
@@ -302,6 +307,47 @@ class BackendDatabaseTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as context:
             verify_proxy_secret(None)
         self.assertEqual(context.exception.status_code, 503)
+
+    def test_production_runtime_configuration_fails_closed(self) -> None:
+        from backend.app.runtime import production_configuration_errors
+
+        os.environ["PROJECT_ENV"] = "production"
+        os.environ.pop("PROJECT_DB_PATH", None)
+        errors = production_configuration_errors()
+        self.assertTrue(any("PROJECT_API_PROXY_SECRET" in item for item in errors))
+        self.assertTrue(any("PROJECT_DB_PATH" in item for item in errors))
+        self.assertTrue(any("PROJECT_UPLOAD_PATH" in item for item in errors))
+
+        os.environ["PROJECT_API_PROXY_SECRET"] = "x" * 48
+        os.environ["PROJECT_BOOTSTRAP_ADMIN_EMAIL"] = "admin@company.cn"
+        os.environ["PROJECT_MEMBERSHIP_MODE"] = "invite_only"
+        os.environ["PROJECT_DB_PATH"] = str(Path(self.temp_dir.name) / "production.db")
+        os.environ["PROJECT_UPLOAD_PATH"] = str(Path(self.temp_dir.name) / "uploads")
+        os.environ["PROJECT_CORS_ORIGINS"] = "https://flowpilot.company.cn"
+        self.assertEqual(production_configuration_errors(), [])
+
+        os.environ["PROJECT_CORS_ORIGINS"] = "http://localhost:3001"
+        self.assertTrue(
+            any("PROJECT_CORS_ORIGINS" in item for item in production_configuration_errors())
+        )
+
+    def test_database_health_checks_initialized_schema(self) -> None:
+        from backend.app.database import database_health, initialize_database
+
+        initialize_database()
+        self.assertEqual(database_health(), {"status": "ok", "database": "sqlite"})
+
+    def test_production_database_does_not_seed_demo_records(self) -> None:
+        from backend.app.database import initialize_database, workspace_snapshot
+
+        os.environ["PROJECT_ENV"] = "production"
+        os.environ["PROJECT_SEED_DEMO_DATA"] = "false"
+        initialize_database()
+        snapshot = workspace_snapshot()
+        self.assertEqual(snapshot["tasks"], [])
+        self.assertEqual(snapshot["resources"], [])
+        self.assertEqual(snapshot["risks"], [])
+        self.assertEqual(snapshot["planBaselines"], [])
 
     def test_member_invitation_role_and_access_control(self) -> None:
         from fastapi import HTTPException

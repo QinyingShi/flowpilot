@@ -458,6 +458,15 @@ def connection() -> Iterator[sqlite3.Connection]:
         db.close()
 
 
+def database_health() -> dict[str, str]:
+    with connection() as db:
+        result = db.execute("PRAGMA quick_check(1)").fetchone()
+        if not result or result[0] != "ok":
+            raise RuntimeError("database_quick_check_failed")
+        db.execute("SELECT 1 FROM projects LIMIT 1").fetchone()
+    return {"status": "ok", "database": "sqlite"}
+
+
 def _migrate_project_record_scope(db: sqlite3.Connection) -> None:
     columns = {
         row["name"] for row in db.execute("PRAGMA table_info(project_records)")
@@ -715,6 +724,10 @@ def _migrate_flat_change_wbs(db: sqlite3.Connection) -> None:
 
 def initialize_database() -> None:
     with connection() as db:
+        seed_demo_data = os.getenv(
+            "PROJECT_SEED_DEMO_DATA",
+            "true" if os.getenv("PROJECT_ENV") != "production" else "false",
+        ).lower() == "true"
         db.executescript(SCHEMA)
         _migrate_project_record_scope(db)
         _migrate_event_scope(db)
@@ -723,15 +736,30 @@ def initialize_database() -> None:
                ON sync_events(project_id, occurred_at DESC)"""
         )
         _migrate_project_child_keys(db)
+        default_project_name = "星云客户平台" if seed_demo_data else "FlowPilot 项目"
+        default_project_code = "NEBULA" if seed_demo_data else "FLOWPILOT"
+        default_project_description = (
+            "客户、订单、支付与增长能力建设"
+            if seed_demo_data
+            else "生产工作区默认项目，可在项目中心修改"
+        )
         db.execute(
             """INSERT OR IGNORE INTO projects
               (id, name, code, description, owner_id, status)
-            VALUES (?, '星云客户平台', 'NEBULA',
-                    '客户、订单、支付与增长能力建设', 'local-user', 'active')""",
-            (PROJECT_ID,),
+            VALUES (?, ?, ?, ?, 'local-user', 'active')""",
+            (
+                PROJECT_ID,
+                default_project_name,
+                default_project_code,
+                default_project_description,
+            ),
         )
         _insert_default_automation_rules(db, PROJECT_ID, "system")
-        seed_data = json.loads(SEED_DATA_PATH.read_text(encoding="utf-8"))
+        seed_data = (
+            json.loads(SEED_DATA_PATH.read_text(encoding="utf-8"))
+            if seed_demo_data
+            else {"tasks": [], "resources": [], "risks": [], "meetings": []}
+        )
         seed_records = []
         for task in seed_data["tasks"]:
             seed_records.append(
@@ -805,11 +833,15 @@ def initialize_database() -> None:
                     json.dumps(blocker, ensure_ascii=False),
                 )
             )
-        for config in [
-            {"version": "v0.9", "mode": "waterfall", "label": "传统瀑布", "locked": True},
-            {"version": "v1.0", "mode": "agile", "label": "敏捷迭代", "locked": True},
-            {"version": "v1.1", "mode": "agile", "label": "敏捷迭代", "locked": True},
-        ]:
+        for config in (
+            [
+                {"version": "v0.9", "mode": "waterfall", "label": "传统瀑布", "locked": True},
+                {"version": "v1.0", "mode": "agile", "label": "敏捷迭代", "locked": True},
+                {"version": "v1.1", "mode": "agile", "label": "敏捷迭代", "locked": True},
+            ]
+            if seed_demo_data
+            else []
+        ):
             seed_records.append(
                 (
                     PROJECT_ID,
@@ -845,7 +877,9 @@ def initialize_database() -> None:
                     label,
                     json.dumps(snapshot, ensure_ascii=False),
                 )
-                for row_id, version_id, key, label, snapshot in DEMO_BASELINES
+                for row_id, version_id, key, label, snapshot in (
+                    DEMO_BASELINES if seed_demo_data else []
+                )
             ],
         )
         db.executemany(
@@ -871,7 +905,9 @@ def initialize_database() -> None:
                     milestone,
                     date,
                 )
-                for version_id, milestone, date, detail in DEMO_ACTUALS
+                for version_id, milestone, date, detail in (
+                    DEMO_ACTUALS if seed_demo_data else []
+                )
             ],
         )
         db.executemany(
@@ -880,7 +916,8 @@ def initialize_database() -> None:
               (id, project_id, change_id, task_id, relation_type, note)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            [
+            (
+                [
                 (
                     "CR-012-2.2-impact",
                     PROJECT_ID,
@@ -897,7 +934,10 @@ def initialize_database() -> None:
                     "历史影响",
                     "支付失败补偿规则影响订单状态补偿",
                 ),
-            ],
+                ]
+                if seed_demo_data
+                else []
+            ),
         )
         active_admins = db.execute(
             """SELECT COUNT(*) AS total FROM workspace_members

@@ -1,0 +1,56 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    env_file:
+      - path: ${FLOWPILOT_ENV_FILE:-.env.production}
+        required: true
+    environment:
+      PROJECT_DB_PATH: /data/flowpilot.db
+      PROJECT_UPLOAD_PATH: /data/uploads
+    ports:
+      - "127.0.0.1:${FLOWPILOT_API_PORT:-8000}:8000"
+    volumes:
+      - flowpilot_data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3))['status'] == 'ok'",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  inspection-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    restart: unless-stopped
+    command:
+      [
+        "python",
+        "-m",
+        "backend.app.inspection_worker",
+        "--poll-seconds",
+        "30",
+      ]
+    env_file:
+      - path: ${FLOWPILOT_ENV_FILE:-.env.production}
+        required: true
+    environment:
+      PROJECT_DB_PATH: /data/flowpilot.db
+      PROJECT_UPLOAD_PATH: /data/uploads
+    volumes:
+      - flowpilot_data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  flowpilot_data:

@@ -33,3 +33,7 @@ npm run dev
 - `PROJECT_BOOTSTRAP_ADMIN_EMAIL`：正式环境首次初始化时允许成为系统管理员的唯一邮箱。
 
 正式部署时可以保持 API 形状不变，将 SQLite 数据访问层替换为 PostgreSQL。
+
+仓库现已提供可直接构建的 `Dockerfile.api` 和生产 Compose 配置。SQLite 版本必须
+挂载持久化 `/data` 卷并保持单 API 副本；部署前请阅读
+[`docs/deployment.md`](../docs/deployment.md)。
