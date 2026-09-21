@@ -26,7 +26,8 @@ FlowPilot 是一个面向软件研发团队的 AI 项目管理工作台。它把
 | 项目、版本、WBS、风险、变更、会议等核心流程 | 本地后端和 SQLite 可持久化使用                               |
 | AI 需求文档分析                             | 已接 OpenAI 服务端调用；需自行配置 API Key                   |
 | AI 巡检与建议                               | 规则巡检可运行；模型增强和业务规则仍需按团队校准             |
-| 飞书、钉钉、Git、Jira 等连接器              | 提供沙箱配置、测试和同步框架；真实生产连接仍需凭证与接口联调 |
+| GitHub 连接器                               | 支持真实仓库校验、提交/PR 同步、WBS 编号关联和巡检闭环       |
+| 飞书、钉钉、在线表格、Jira 等连接器         | 提供沙箱配置、测试和同步框架；真实生产连接仍需凭证与接口联调 |
 | 登录与身份切换                              | 本地开发身份切换可用；生产环境应接入企业 SSO/OIDC            |
 | 数据库                                      | 单机 SQLite 可用；多实例生产部署建议迁移 PostgreSQL          |
 | Sites / Cloudflare D1、R2                   | 保留部署结构和数据 Schema；当前完整业务仍以 Python API 为准  |
@@ -89,6 +90,13 @@ npm run dev
 - 将站点地址写入 `NEXT_PUBLIC_SITE_URL`
 - 如启用 AI 文档分析，安全地注入 `OPENAI_API_KEY`
 
+如启用 GitHub 真实同步：
+
+- 在服务端设置 `GIT_ACCESS_TOKEN`，不要把 Token 填入页面或提交到仓库
+- 私有仓库建议使用细粒度 Token，并只授予 Contents（只读）和 Pull requests（只读）权限
+- 在“集成与自动化中心”将 Git 设为“真实第三方”，仓库填写 `owner/repository`
+- 提交信息或 PR 标题/描述引用 WBS 编号后，系统才会建立任务进度证据
+
 不要提交 `.env`、数据库、上传文件、第三方凭证或真实组织数据。`npm run dev` 会读取根目录的 `.env` 和 `.env.local`，已有系统环境变量优先。
 
 ## 常用命令
@@ -120,7 +128,7 @@ npm run build           # 生产构建
 
 - 生产级 OIDC/企业 SSO 与细粒度 RBAC
 - PostgreSQL 和对象存储适配
-- 飞书、钉钉、GitHub/GitLab、Jira 的真实双向同步
+- 飞书、钉钉、GitLab、Jira 的真实双向同步，以及 GitHub Webhook 增量同步
 - Webhook、幂等、失败重试和连接器可观测性
 - AI 评测集、建议反馈闭环和项目级知识库
 - E2E 测试、迁移工具和正式部署手册
