@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import sqlite3
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +24,7 @@ class BackendDatabaseTests(unittest.TestCase):
         os.environ.pop("PROJECT_MEMBERSHIP_MODE", None)
         os.environ.pop("PROJECT_BOOTSTRAP_ADMIN_EMAIL", None)
         os.environ.pop("PROJECT_UPLOAD_PATH", None)
+        os.environ.pop("FLOWPILOT_BACKUP_DIR", None)
         os.environ.pop("PROJECT_CORS_ORIGINS", None)
         os.environ.pop("FORWARDED_ALLOW_IPS", None)
         os.environ.pop("PROJECT_ACCESS_LOG", None)
@@ -49,6 +52,34 @@ class BackendDatabaseTests(unittest.TestCase):
         ):
             os.environ.pop(name, None)
         self.temp_dir.cleanup()
+
+    def test_local_backup_contains_database_and_uploads(self) -> None:
+        from backend.app.database import initialize_database
+        from scripts.backup import backup_workspace
+
+        upload_path = Path(self.temp_dir.name) / "uploads"
+        upload_path.mkdir()
+        (upload_path / "requirement.txt").write_text("backup me", encoding="utf-8")
+        os.environ["PROJECT_UPLOAD_PATH"] = str(upload_path)
+        os.environ["FLOWPILOT_BACKUP_DIR"] = str(
+            Path(self.temp_dir.name) / "backups"
+        )
+        initialize_database()
+
+        destination = backup_workspace()
+
+        self.assertIsNotNone(destination)
+        assert destination is not None
+        with sqlite3.connect(destination / "flowpilot.db") as database:
+            self.assertEqual(
+                database.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'"
+                ).fetchone()[0]
+                > 0,
+                True,
+            )
+        with tarfile.open(destination / "uploads.tar.gz", "r:gz") as archive:
+            self.assertIn("uploads/requirement.txt", archive.getnames())
 
     def test_embedded_inspection_worker_configuration(self) -> None:
         from backend.app.main import (
