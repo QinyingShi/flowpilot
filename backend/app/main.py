@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import os
@@ -51,11 +52,39 @@ from .github_connector import (
     sync_github_evidence,
     test_github_connection,
 )
+from .inspection_worker import run_due_projects
 from .task_model import valid_task_hierarchy, valid_task_record
 from .runtime import validate_runtime_configuration
 
 
 VALID_VERSIONS = {"v0.9", "v1.0", "v1.1"}
+
+
+def embedded_inspection_enabled() -> bool:
+    return os.getenv("PROJECT_EMBED_INSPECTION_WORKER", "false").lower() == "true"
+
+
+def inspection_poll_seconds() -> int:
+    raw_value = os.getenv("PROJECT_INSPECTION_POLL_SECONDS", "30")
+    try:
+        return max(5, int(raw_value))
+    except ValueError as error:
+        raise RuntimeError(
+            "PROJECT_INSPECTION_POLL_SECONDS must be an integer"
+        ) from error
+
+
+async def run_embedded_inspection_worker(stop_event: asyncio.Event) -> None:
+    poll_seconds = inspection_poll_seconds()
+    while not stop_event.is_set():
+        try:
+            await asyncio.to_thread(run_due_projects)
+        except Exception as error:  # keep the API available when one scan fails
+            print(f"inspection worker failed: {error}", flush=True)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=poll_seconds)
+        except TimeoutError:
+            continue
 
 
 def valid_milestone_datetime(value: str) -> bool:
@@ -178,7 +207,16 @@ def valid_meeting_minutes(meeting: dict[str, Any]) -> bool:
 async def lifespan(_: FastAPI):
     validate_runtime_configuration()
     initialize_database()
-    yield
+    stop_event = asyncio.Event()
+    worker_task: asyncio.Task[None] | None = None
+    if embedded_inspection_enabled():
+        worker_task = asyncio.create_task(run_embedded_inspection_worker(stop_event))
+    try:
+        yield
+    finally:
+        if worker_task is not None:
+            stop_event.set()
+            await worker_task
 
 
 app = FastAPI(
