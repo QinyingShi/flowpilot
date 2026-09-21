@@ -71,6 +71,18 @@ cp .env.example .env.local
 npm run dev
 ```
 
+不购买云服务、在本机持续使用时运行：
+
+```bash
+npm run local
+```
+
+该模式使用本地 SQLite、把巡检调度器嵌入 API，并在启动时及此后每 24 小时备份到
+`backups/`。Mac 关机或进程退出后，其他设备将无法访问，但已有数据不会丢失。
+
+如需让同一可信 Wi-Fi 下的设备临时访问，在 `.env.local` 设置
+`FLOWPILOT_LAN_ACCESS=true` 后重新运行。此模式没有公网认证边界，禁止直接暴露到互联网。
+
 打开：
 
 - 工作台：<http://localhost:3001>
@@ -103,6 +115,8 @@ npm run dev
 
 ```bash
 npm run dev             # 同时启动前端、API 和巡检 Worker
+npm run local           # 免费本机常驻模式，内嵌巡检并自动备份
+npm run backup          # 立即生成数据库与上传文件备份
 npm run dev:web         # 只启动前端
 npm run dev:api         # 只启动 API
 npm run dev:worker      # 只启动巡检 Worker

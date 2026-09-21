@@ -9,6 +9,16 @@ FlowPilot 当前生产拓扑由两个部分组成：
 必须位于本机持久化磁盘。不要把 SQLite 文件放在临时文件系统、对象存储或不保证
 文件锁语义的网络文件系统中。需要多副本或高可用时，应先迁移 PostgreSQL。
 
+## 零费用方案：本机运行
+
+当前无需公网服务时，推荐直接运行 `npm run local`。它使用本地数据库、内嵌巡检调度
+器，并在启动时及每 24 小时调用 SQLite backup API，把数据库和上传文件保存到
+`backups/`。也可随时运行 `npm run backup` 手动备份。
+
+在 `.env.local` 设置 `FLOWPILOT_LAN_ACCESS=true` 后，同一可信局域网中的设备可通过
+Mac 的局域网 IP 和 3001 端口访问。主机必须保持开机，macOS 防火墙也需要允许 Node
+接收入站连接。Python API 仍只监听本机地址；此开发身份模式不得直接暴露到公网。
+
 ## 推荐托管方案：Render
 
 仓库根目录的 `render.yaml` 可创建一个 Docker Web Service，并挂载 1 GB `/data`
