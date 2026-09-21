@@ -166,6 +166,26 @@ CREATE TABLE IF NOT EXISTS sync_events (
 CREATE INDEX IF NOT EXISTS idx_sync_events_connector_time
   ON sync_events(connector, occurred_at DESC);
 
+CREATE TABLE IF NOT EXISTS external_work_evidence (
+  project_id TEXT NOT NULL,
+  connector TEXT NOT NULL,
+  external_id TEXT NOT NULL,
+  task_id TEXT,
+  evidence_type TEXT NOT NULL CHECK (evidence_type IN ('commit', 'pull_request')),
+  title TEXT NOT NULL,
+  url TEXT NOT NULL,
+  state TEXT NOT NULL,
+  author TEXT NOT NULL DEFAULT '',
+  occurred_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(project_id, connector, external_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_external_work_evidence_task_time
+  ON external_work_evidence(project_id, task_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_external_work_evidence_connector_time
+  ON external_work_evidence(project_id, connector, occurred_at DESC);
+
 CREATE TABLE IF NOT EXISTS connector_configs (
   project_id TEXT NOT NULL,
   connector TEXT NOT NULL,
@@ -1367,6 +1387,57 @@ def append_sync_event(
         )
 
 
+def replace_connector_evidence(
+    *,
+    project_id: str,
+    connector: str,
+    evidence: list[dict[str, Any]],
+) -> int:
+    if connector not in VALID_CONNECTORS:
+        raise ValueError("invalid_connector")
+    rows: list[tuple[Any, ...]] = []
+    for item in evidence:
+        evidence_type = str(item.get("evidenceType", ""))
+        if evidence_type not in {"commit", "pull_request"}:
+            raise ValueError("invalid_external_evidence")
+        task_ids = item.get("taskIds")
+        linked_task_ids = (
+            [str(task_id) for task_id in task_ids if str(task_id).strip()]
+            if isinstance(task_ids, list) and task_ids
+            else [None]
+        )
+        for task_id in linked_task_ids:
+            rows.append(
+                (
+                    project_id,
+                    connector,
+                    str(item.get("externalId", "")),
+                    task_id,
+                    evidence_type,
+                    str(item.get("title", "")),
+                    str(item.get("url", "")),
+                    str(item.get("state", "")),
+                    str(item.get("author", "")),
+                    str(item.get("occurredAt", "")),
+                    json.dumps(item.get("payload", {}), ensure_ascii=False),
+                )
+            )
+    with connection() as db:
+        db.execute(
+            "DELETE FROM external_work_evidence WHERE project_id = ? AND connector = ?",
+            (project_id, connector),
+        )
+        if rows:
+            db.executemany(
+                """INSERT INTO external_work_evidence
+                  (project_id, connector, external_id, task_id, evidence_type,
+                   title, url, state, author, occurred_at, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+    return len(rows)
+
+
 def upsert_automation_rule(
     *,
     project_id: str,
@@ -1412,12 +1483,22 @@ def _inspection_candidates(
     risks: list[dict[str, Any]],
     blockers: list[dict[str, Any]],
     config: dict[str, Any],
+    external_evidence: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     year = now.year
     load_threshold = int(config.get("loadThreshold", 105))
     stale_hours = int(config.get("riskStaleHours", 24))
     findings: list[dict[str, Any]] = []
+
+    evidence_by_task: dict[str, list[dict[str, Any]]] = {}
+    unlinked_evidence = 0
+    for item in external_evidence:
+        task_id = item.get("task_id")
+        if task_id:
+            evidence_by_task.setdefault(str(task_id), []).append(item)
+        else:
+            unlinked_evidence += 1
 
     blocker_by_task = {
         str(item.get("taskId")): item
@@ -1433,18 +1514,60 @@ def _inspection_candidates(
         month, day = (int(part) for part in str(task[8]).split("/")[:2])
         overdue = datetime(year, month, day, tzinfo=now.tzinfo).date() < now.date()
         if task[5] != "有阻塞" and not overdue:
-            continue
-        reason = str(blocker.get("reason")) if blocker else "计划日期已过但任务尚未完成"
+            pass
+        else:
+            reason = str(blocker.get("reason")) if blocker else "计划日期已过但任务尚未完成"
+            findings.append(
+                {
+                    "fingerprint": f"task_progress:{task_id}",
+                    "findingType": "progress",
+                    "severity": "high" if task[6] == "高" or task[5] == "有阻塞" else "medium",
+                    "title": f"{task[3]} · {task[1]}进度异常",
+                    "detail": f"当前进度 {progress}%，计划完成日 {task[8]}；{reason}。",
+                    "owner": str(task[4]),
+                    "recommendation": str(blocker.get("resolutionPlan")) if blocker else "复核剩余工作量并调整计划或补充阻塞原因。",
+                    "sourceRefs": [{"type": "task", "id": task_id}],
+                }
+            )
+
+        task_evidence = evidence_by_task.get(task_id, [])
+        merged_pull = next(
+            (
+                item
+                for item in task_evidence
+                if item.get("evidence_type") == "pull_request"
+                and item.get("state") == "merged"
+            ),
+            None,
+        )
+        if merged_pull and progress < 100:
+            findings.append(
+                {
+                    "fingerprint": f"git_progress_mismatch:{task_id}",
+                    "findingType": "progress",
+                    "severity": "medium",
+                    "title": f"{task_id} 已有合并 PR，但 WBS 仍为 {progress}%",
+                    "detail": f"GitHub 证据“{merged_pull.get('title')}”已合并，任务状态仍为“{task[5]}”。",
+                    "owner": str(task[4]),
+                    "recommendation": "核验验收条件；已完成则更新任务进度，未完成则补充剩余工作或新建子任务。",
+                    "sourceRefs": [
+                        {"type": "task", "id": task_id},
+                        {"type": "github", "id": str(merged_pull.get("external_id", ""))},
+                    ],
+                }
+            )
+
+    if external_evidence and unlinked_evidence:
         findings.append(
             {
-                "fingerprint": f"task_progress:{task_id}",
+                "fingerprint": "git_unlinked_evidence",
                 "findingType": "progress",
-                "severity": "high" if task[6] == "高" or task[5] == "有阻塞" else "medium",
-                "title": f"{task[3]} · {task[1]}进度异常",
-                "detail": f"当前进度 {progress}%，计划完成日 {task[8]}；{reason}。",
-                "owner": str(task[4]),
-                "recommendation": str(blocker.get("resolutionPlan")) if blocker else "复核剩余工作量并调整计划或补充阻塞原因。",
-                "sourceRefs": [{"type": "task", "id": task_id}],
+                "severity": "low" if unlinked_evidence < 10 else "medium",
+                "title": f"{unlinked_evidence} 条 Git 记录未关联 WBS 任务",
+                "detail": "提交信息或 PR 标题/描述中未识别到有效任务编号，无法作为计划进度证据。",
+                "owner": "项目经理",
+                "recommendation": "要求提交和 PR 引用 WBS 编号，或人工补充任务关联后重新巡检。",
+                "sourceRefs": [{"type": "connector", "id": "git"}],
             }
         )
 
@@ -1530,6 +1653,11 @@ def run_project_inspection(
                WHERE project_id = ? AND rule_key = 'ai_inspection'""",
             (project_id,),
         ).fetchone()
+        git_rule = db.execute(
+            """SELECT enabled, rule_json FROM automation_rules
+               WHERE project_id = ? AND rule_key = 'git_verification'""",
+            (project_id,),
+        ).fetchone()
         if trigger_type == "scheduled" and (not rule or not rule["enabled"]):
             db.execute(
                 """INSERT INTO inspection_runs
@@ -1554,9 +1682,26 @@ def run_project_inspection(
         records: dict[str, list[Any]] = {"task": [], "resource": [], "risk": [], "blocker": []}
         for row in rows:
             records[row["entity_type"]].append(json.loads(row["payload_json"]))
+        external_evidence = (
+            _rows(
+                db,
+                """SELECT external_id, task_id, evidence_type, title, url, state,
+                          author, occurred_at
+                   FROM external_work_evidence
+                   WHERE project_id = ? AND connector = 'git'""",
+                (project_id,),
+            )
+            if git_rule and git_rule["enabled"]
+            else []
+        )
         config = json.loads(rule["rule_json"]) if rule else {}
         findings = _inspection_candidates(
-            records["task"], records["resource"], records["risk"], records["blocker"], config
+            records["task"],
+            records["resource"],
+            records["risk"],
+            records["blocker"],
+            config,
+            external_evidence,
         )
         fingerprints = {item["fingerprint"] for item in findings}
         for finding in findings:
@@ -2103,6 +2248,14 @@ def workspace_snapshot(project_id: str = PROJECT_ID) -> dict[str, Any]:
                 """SELECT connector, direction, entity_type, status, detail, occurred_at
                    FROM sync_events WHERE project_id = ?
                    ORDER BY occurred_at DESC LIMIT 20""",
+                (project_id,),
+            ),
+            "externalWorkEvidence": _rows(
+                db,
+                """SELECT connector, external_id, task_id, evidence_type, title,
+                          url, state, author, occurred_at, payload_json, synced_at
+                   FROM external_work_evidence WHERE project_id = ?
+                   ORDER BY occurred_at DESC, external_id DESC LIMIT 200""",
                 (project_id,),
             ),
             "connectorConfigs": _rows(

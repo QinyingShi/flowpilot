@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 import sqlite3
 from contextlib import asynccontextmanager
@@ -28,6 +29,7 @@ from .database import (
     member_has_permission,
     member_has_project_access,
     record_milestone_actual,
+    replace_connector_evidence,
     save_plan_baseline,
     set_connector_status,
     upsert_project_record,
@@ -42,6 +44,11 @@ from .database import (
     upsert_connector_config,
     upsert_tasks_with_hierarchy,
     workspace_snapshot,
+)
+from .github_connector import (
+    GitHubConnectorError,
+    sync_github_evidence,
+    test_github_connection,
 )
 from .task_model import valid_task_hierarchy, valid_task_record
 
@@ -596,6 +603,64 @@ def mutate_workspace(
                 for name in required_credentials.get(connector, ())
                 if not os.getenv(name)
             ]
+            if connector == "git" and not missing:
+                options = json.loads(config["config_json"] or "{}")
+                try:
+                    repository = test_github_connection(
+                        base_url=str(config["base_url"]),
+                        scope=str(options.get("scope", "")),
+                        token=os.environ["GIT_ACCESS_TOKEN"],
+                    )
+                except GitHubConnectorError as error:
+                    detail = str(error)
+                    set_connector_status(
+                        project_id=project_id,
+                        connector=connector,
+                        status="error",
+                        error=detail,
+                    )
+                    append_sync_event(
+                        project_id=project_id,
+                        connector=connector,
+                        direction="inbound",
+                        entity_type="connection_test",
+                        status="failed",
+                        detail=detail,
+                    )
+                    raise HTTPException(status_code=502, detail=detail) from error
+                detail = (
+                    f"GitHub 仓库 {repository['scope']} 连接成功；"
+                    f"默认分支 {repository['defaultBranch']}"
+                )
+                set_connector_status(
+                    project_id=project_id,
+                    connector=connector,
+                    status="connected",
+                )
+                append_sync_event(
+                    project_id=project_id,
+                    connector=connector,
+                    direction="inbound",
+                    entity_type="connection_test",
+                    status="success",
+                    detail=detail,
+                )
+                append_project_audit_log(
+                    actor_id=user["id"],
+                    actor_type="connector",
+                    action=body.action,
+                    entity_type="connector",
+                    entity_id=connector,
+                    detail=detail,
+                )
+                return {
+                    "ok": True,
+                    "connector": connector,
+                    "status": "connected",
+                    "mode": "live",
+                    "detail": detail,
+                    "repository": repository,
+                }
             detail = (
                 f"服务端缺少凭证：{', '.join(missing)}"
                 if missing
@@ -630,6 +695,92 @@ def mutate_workspace(
                 raise HTTPException(status_code=400, detail="connector_not_configured")
             if config["status"] != "connected":
                 raise HTTPException(status_code=409, detail="connector_not_connected")
+            if config["mode"] == "live" and connector == "git":
+                token = os.getenv("GIT_ACCESS_TOKEN", "")
+                if not token:
+                    raise HTTPException(
+                        status_code=400, detail="服务端缺少凭证：GIT_ACCESS_TOKEN"
+                    )
+                options = json.loads(config["config_json"] or "{}")
+                snapshot = workspace_snapshot(project_id)
+                task_ids = [
+                    str(task[0])
+                    for task in snapshot.get("tasks", [])
+                    if isinstance(task, list) and task
+                ]
+                try:
+                    result = sync_github_evidence(
+                        base_url=str(config["base_url"]),
+                        scope=str(options.get("scope", "")),
+                        token=token,
+                        task_ids=task_ids,
+                        lookback_days=int(options.get("lookbackDays", 30)),
+                    )
+                    stored = replace_connector_evidence(
+                        project_id=project_id,
+                        connector=connector,
+                        evidence=result["evidence"],
+                    )
+                    inspection = run_project_inspection(
+                        project_id=project_id,
+                        trigger_type="manual",
+                        actor_id="github-connector",
+                    )
+                except (GitHubConnectorError, ValueError) as error:
+                    detail = str(error)
+                    set_connector_status(
+                        project_id=project_id,
+                        connector=connector,
+                        status="error",
+                        error=detail,
+                    )
+                    append_sync_event(
+                        project_id=project_id,
+                        connector=connector,
+                        direction="inbound",
+                        entity_type="progress_evidence",
+                        status="failed",
+                        detail=detail,
+                    )
+                    raise HTTPException(status_code=502, detail=detail) from error
+                detail = (
+                    f"GitHub 同步完成：{result['commits']} 个提交、"
+                    f"{result['pullRequests']} 个 PR；{result['linked']} 条记录命中任务编号，"
+                    f"{result['unlinked']} 条待人工关联"
+                )
+                set_connector_status(
+                    project_id=project_id,
+                    connector=connector,
+                    status="connected",
+                    synced=True,
+                )
+                append_sync_event(
+                    project_id=project_id,
+                    connector=connector,
+                    direction="inbound",
+                    entity_type="progress_evidence",
+                    status="success",
+                    detail=detail,
+                )
+                append_project_audit_log(
+                    actor_id=user["id"],
+                    actor_type="connector",
+                    action=body.action,
+                    entity_type="progress_evidence",
+                    entity_id=connector,
+                    detail=detail,
+                )
+                return {
+                    "ok": True,
+                    "connector": connector,
+                    "count": stored,
+                    "detail": detail,
+                    "inspection": {
+                        "id": inspection["id"],
+                        "total": inspection["total"],
+                    },
+                    **{key: value for key, value in result.items() if key != "evidence"},
+                }
             if config["mode"] != "sandbox":
                 raise HTTPException(status_code=409, detail="live_sync_not_available")
             demo_counts = {

@@ -29,6 +29,8 @@ class BackendDatabaseTests(unittest.TestCase):
             "DINGTALK_APP_SECRET",
             "SHEET_CONNECTOR_TOKEN",
             "GIT_ACCESS_TOKEN",
+            "GITHUB_ALLOWED_HOSTS",
+            "GITHUB_API_VERSION",
             "JIRA_BASE_URL",
             "JIRA_API_TOKEN",
             "PROJECT_AI_REQUIREMENTS_ENABLED",
@@ -1522,6 +1524,116 @@ class BackendDatabaseTests(unittest.TestCase):
         self.assertEqual(merged["parserMode"], "openai-structured-output")
         self.assertEqual(merged["tasks"][1]["owner"], "陈默")
         self.assertEqual(merged["tasks"][1]["dependencySequences"], [1])
+
+    def test_github_connector_matches_wbs_references(self) -> None:
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        from backend.app.github_connector import (
+            sync_github_evidence,
+            test_github_connection as verify_github_connection,
+        )
+
+        repository_payload = {
+            "full_name": "acme/flowpilot",
+            "default_branch": "main",
+            "private": True,
+            "html_url": "https://github.com/acme/flowpilot",
+        }
+        commits_payload = [
+            {
+                "sha": "abc123",
+                "html_url": "https://github.com/acme/flowpilot/commit/abc123",
+                "commit": {
+                    "message": "feat: finish 2.2 payment adapter",
+                    "author": {"name": "Dev", "date": "2026-09-20T10:00:00Z"},
+                },
+                "author": {"login": "dev-user"},
+            }
+        ]
+        current_time = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        pulls_payload = [
+            {
+                "number": 18,
+                "title": "Deliver CR-018-W2 integration",
+                "body": "Closes CR-018-W2",
+                "state": "closed",
+                "merged_at": current_time,
+                "updated_at": current_time,
+                "html_url": "https://github.com/acme/flowpilot/pull/18",
+                "user": {"login": "dev-user"},
+                "base": {"ref": "main"},
+                "head": {"ref": "feature/cr-018"},
+            }
+        ]
+        with patch(
+            "backend.app.github_connector._request_json",
+            side_effect=[repository_payload, commits_payload, pulls_payload],
+        ):
+            connection = verify_github_connection(
+                base_url="https://github.com",
+                scope="acme/flowpilot",
+                token="secret",
+            )
+            result = sync_github_evidence(
+                base_url="https://github.com",
+                scope="acme/flowpilot",
+                token="secret",
+                task_ids=["2.2", "CR-018-W2", "2"],
+                lookback_days=30,
+            )
+        self.assertEqual(connection["scope"], "acme/flowpilot")
+        self.assertEqual(result["linked"], 2)
+        self.assertEqual(result["evidence"][0]["taskIds"], ["2.2"])
+        self.assertEqual(result["evidence"][1]["taskIds"], ["CR-018-W2"])
+        self.assertEqual(result["evidence"][1]["state"], "merged")
+
+    def test_github_evidence_enters_inspection_loop(self) -> None:
+        from backend.app.database import (
+            initialize_database,
+            replace_connector_evidence,
+            run_project_inspection,
+            workspace_snapshot,
+        )
+
+        initialize_database()
+        stored = replace_connector_evidence(
+            project_id="nebula-customer-platform",
+            connector="git",
+            evidence=[
+                {
+                    "externalId": "pull_request:88",
+                    "evidenceType": "pull_request",
+                    "taskIds": ["2.2"],
+                    "title": "#88 完成支付联调 2.2",
+                    "url": "https://github.com/acme/repo/pull/88",
+                    "state": "merged",
+                    "author": "dev-user",
+                    "occurredAt": "2026-09-20T12:00:00Z",
+                    "payload": {"number": 88},
+                }
+            ],
+        )
+        result = run_project_inspection(
+            project_id="nebula-customer-platform",
+            trigger_type="manual",
+            actor_id="tester",
+        )
+        snapshot = workspace_snapshot()
+        self.assertEqual(stored, 1)
+        self.assertTrue(
+            any(
+                item["fingerprint"] == "git_progress_mismatch:2.2"
+                for item in result["findings"]
+            )
+        )
+        self.assertTrue(
+            any(
+                item["external_id"] == "pull_request:88"
+                and item["task_id"] == "2.2"
+                for item in snapshot["externalWorkEvidence"]
+            )
+        )
 
 
 if __name__ == "__main__":

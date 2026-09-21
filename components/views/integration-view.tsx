@@ -89,6 +89,18 @@ type InspectionRun = {
   started_at: string;
 };
 
+type ExternalWorkEvidence = {
+  connector: string;
+  external_id: string;
+  task_id?: string | null;
+  evidence_type: 'commit' | 'pull_request';
+  title: string;
+  url: string;
+  state: string;
+  author: string;
+  occurred_at: string;
+};
+
 type WorkspacePayload = {
   user: { role: string };
   projectId: string;
@@ -100,6 +112,7 @@ type WorkspacePayload = {
     members?: { display_name: string; email: string }[];
     inspectionFindings?: InspectionFinding[];
     inspectionRuns?: InspectionRun[];
+    externalWorkEvidence?: ExternalWorkEvidence[];
   };
 };
 
@@ -241,6 +254,7 @@ export default function IntegrationView() {
   const [displayName, setDisplayName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [optionValue, setOptionValue] = useState('');
+  const [lookbackDays, setLookbackDays] = useState(30);
   const [resolving, setResolving] = useState<InspectionFinding | null>(null);
   const [resolutionNote, setResolutionNote] = useState('');
   const [ruleDrafts, setRuleDrafts] = useState<
@@ -353,6 +367,7 @@ export default function IntegrationView() {
     setDisplayName(saved?.display_name ?? `${definition.name}连接`);
     setBaseUrl(saved?.base_url ?? definition.defaultUrl);
     setOptionValue(scalarText(options.scope));
+    setLookbackDays(Number(options.lookbackDays) || 30);
     setNotice('');
   }
 
@@ -367,7 +382,10 @@ export default function IntegrationView() {
           mode: configMode,
           displayName,
           baseUrl,
-          options: { scope: optionValue },
+          options: {
+            scope: optionValue,
+            ...(configuring === 'git' ? { lookbackDays } : {}),
+          },
         },
       });
       setNotice('配置已保存。下一步请执行连接测试。');
@@ -387,13 +405,11 @@ export default function IntegrationView() {
     try {
       const result = await mutate({ action, connector });
       if (action === 'test_connector') {
-        setNotice(
-          result.ok
-            ? '沙箱连接验证通过；该结果不代表真实第三方已授权。'
-            : (result.detail ?? '连接验证失败'),
-        );
+        setNotice(result.detail ?? '连接验证完成。');
       } else if (action === 'sync_connector') {
-        setNotice(`同步演练完成，共校验 ${result.count ?? 0} 条样例记录。`);
+        setNotice(
+          result.detail ?? `同步完成，共处理 ${result.count ?? 0} 条记录。`,
+        );
       } else {
         setNotice('连接已停用，配置仍保留。');
       }
@@ -476,6 +492,8 @@ export default function IntegrationView() {
     (finding) => finding.status !== 'resolved',
   );
   const latestRun = workspace?.snapshot.inspectionRuns?.[0];
+  const gitEvidence = workspace?.snapshot.externalWorkEvidence ?? [];
+  const linkedGitEvidence = gitEvidence.filter((item) => item.task_id);
 
   return (
     <>
@@ -858,8 +876,52 @@ export default function IntegrationView() {
             </CardTitle>
           </CardHeader>
           <CardContent className="text-xs leading-6 text-muted-foreground">
-            Git/Jira
-            未连接时不展示伪造指标。连接后才会根据任务引用、提交、PR、流水线、缺陷严重度和重开率生成进度证据与版本质量预警。
+            {gitEvidence.length === 0 ? (
+              <p>
+                Git/Jira 未连接时不展示伪造指标。GitHub
+                真实同步后，会按提交信息和 PR 标题/描述中的 WBS
+                编号生成进度证据。
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  {[
+                    ['同步证据', gitEvidence.length],
+                    ['已关联任务', linkedGitEvidence.length],
+                    [
+                      '待人工关联',
+                      gitEvidence.length - linkedGitEvidence.length,
+                    ],
+                  ].map(([label, value]) => (
+                    <div key={label} className="rounded-lg bg-muted/60 p-2">
+                      <p className="text-base font-semibold text-foreground">
+                        {value}
+                      </p>
+                      <p className="text-[10px]">{label}</p>
+                    </div>
+                  ))}
+                </div>
+                {gitEvidence.slice(0, 5).map((item) => (
+                  <a
+                    key={`${item.external_id}-${item.task_id ?? 'unlinked'}`}
+                    href={item.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block rounded-lg border p-2 transition-colors hover:bg-muted/60"
+                  >
+                    <span className="font-medium text-foreground">
+                      {item.task_id ? `${item.task_id} · ` : ''}
+                      {item.title}
+                    </span>
+                    <span className="mt-1 block text-[10px]">
+                      {item.evidence_type === 'pull_request' ? 'PR' : '提交'} ·{' '}
+                      {item.state} · {item.author || '未知作者'} ·{' '}
+                      {readableTime(item.occurred_at)}
+                    </span>
+                  </a>
+                ))}
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -941,6 +1003,30 @@ export default function IntegrationView() {
                 }
               />
             </label>
+            {configuring === 'git' && (
+              <label
+                className="block text-xs font-medium"
+                htmlFor="connector-lookback-days"
+              >
+                同步回溯天数
+                <Input
+                  id="connector-lookback-days"
+                  className="mt-1"
+                  type="number"
+                  min={1}
+                  max={90}
+                  value={lookbackDays}
+                  onChange={(event) =>
+                    setLookbackDays(
+                      Math.max(
+                        1,
+                        Math.min(90, Number(event.target.value) || 1),
+                      ),
+                    )
+                  }
+                />
+              </label>
+            )}
             <div
               className={
                 configMode === 'sandbox'
