@@ -28,6 +28,7 @@ from .database import (
     initialize_database,
     list_projects,
     list_workspace_members,
+    link_external_work_evidence,
     member_has_permission,
     member_has_project_access,
     record_milestone_actual,
@@ -130,6 +131,7 @@ class WorkspaceAction(BaseModel):
     projectStatus: str | None = None
     connector: str | None = None
     connectorConfig: dict[str, Any] | None = None
+    taskId: str | None = None
     automationRule: dict[str, Any] | None = None
     finding: dict[str, Any] | None = None
     requirementDocument: dict[str, Any] | None = None
@@ -649,7 +651,7 @@ def mutate_workspace(
                 "feishu": ("FEISHU_APP_ID", "FEISHU_APP_SECRET"),
                 "dingtalk": ("DINGTALK_APP_KEY", "DINGTALK_APP_SECRET"),
                 "sheet": ("SHEET_CONNECTOR_TOKEN",),
-                "git": ("GIT_ACCESS_TOKEN",),
+                "git": (),
                 "jira": ("JIRA_BASE_URL", "JIRA_API_TOKEN"),
             }
             missing = [
@@ -663,7 +665,7 @@ def mutate_workspace(
                     repository = test_github_connection(
                         base_url=str(config["base_url"]),
                         scope=str(options.get("scope", "")),
-                        token=os.environ["GIT_ACCESS_TOKEN"],
+                        token=os.getenv("GIT_ACCESS_TOKEN", ""),
                     )
                 except GitHubConnectorError as error:
                     detail = str(error)
@@ -685,6 +687,11 @@ def mutate_workspace(
                 detail = (
                     f"GitHub 仓库 {repository['scope']} 连接成功；"
                     f"默认分支 {repository['defaultBranch']}"
+                    + (
+                        "（公共仓库免 Token 模式）"
+                        if not os.getenv("GIT_ACCESS_TOKEN")
+                        else ""
+                    )
                 )
                 set_connector_status(
                     project_id=project_id,
@@ -751,10 +758,6 @@ def mutate_workspace(
                 raise HTTPException(status_code=409, detail="connector_not_connected")
             if config["mode"] == "live" and connector == "git":
                 token = os.getenv("GIT_ACCESS_TOKEN", "")
-                if not token:
-                    raise HTTPException(
-                        status_code=400, detail="服务端缺少凭证：GIT_ACCESS_TOKEN"
-                    )
                 options = json.loads(config["config_json"] or "{}")
                 snapshot = workspace_snapshot(project_id)
                 task_ids = [
@@ -869,6 +872,43 @@ def mutate_workspace(
                 detail=detail,
             )
             return {"ok": True, "connector": connector, "count": count, "detail": detail}
+
+        if body.action == "link_external_evidence":
+            connector = body.connector or ""
+            external_id = body.entityId or ""
+            task_id = body.taskId or ""
+            try:
+                link_external_work_evidence(
+                    project_id=project_id,
+                    connector=connector,
+                    external_id=external_id,
+                    task_id=task_id,
+                )
+                inspection = run_project_inspection(
+                    project_id=project_id,
+                    trigger_type="manual",
+                    actor_id=user["id"],
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            append_project_audit_log(
+                actor_id=user["id"],
+                actor_type="user",
+                action=body.action,
+                entity_type="progress_evidence",
+                entity_id=external_id,
+                detail=f"connector={connector} task={task_id}",
+            )
+            return {
+                "ok": True,
+                "connector": connector,
+                "externalId": external_id,
+                "taskId": task_id,
+                "inspection": {
+                    "id": inspection["id"],
+                    "total": inspection["total"],
+                },
+            }
 
         if body.action == "disconnect_connector":
             connector = body.connector or ""

@@ -1685,6 +1685,66 @@ class BackendDatabaseTests(unittest.TestCase):
         self.assertEqual(result["evidence"][1]["taskIds"], ["CR-018-W2"])
         self.assertEqual(result["evidence"][1]["state"], "merged")
 
+    def test_public_github_requests_do_not_require_token(self) -> None:
+        from http.client import IncompleteRead
+        from unittest.mock import MagicMock, patch
+
+        from backend.app.github_connector import _repository, _request_json
+
+        response = MagicMock()
+        response.read.return_value = b'{"full_name":"acme/public-repo"}'
+        response.__enter__.return_value = response
+        with patch(
+            "backend.app.github_connector.urlopen",
+            side_effect=[IncompleteRead(b"partial"), response],
+        ) as urlopen:
+            payload = _request_json(
+                _repository("acme/public-repo", "https://github.com"),
+                "/repos/acme/public-repo",
+                "",
+            )
+        request = urlopen.call_args.args[0]
+        headers = {key.lower(): value for key, value in request.header_items()}
+        self.assertEqual(payload["full_name"], "acme/public-repo")
+        self.assertEqual(urlopen.call_count, 2)
+        self.assertNotIn("authorization", headers)
+
+    def test_unlinked_github_evidence_can_be_linked_to_wbs(self) -> None:
+        from backend.app.database import (
+            initialize_database,
+            link_external_work_evidence,
+            replace_connector_evidence,
+            workspace_snapshot,
+        )
+
+        initialize_database()
+        replace_connector_evidence(
+            project_id="nebula-customer-platform",
+            connector="git",
+            evidence=[
+                {
+                    "externalId": "commit:unlinked",
+                    "evidenceType": "commit",
+                    "taskIds": [],
+                    "title": "完成支付适配但未填写任务编号",
+                    "url": "https://github.com/acme/repo/commit/unlinked",
+                    "state": "committed",
+                    "author": "dev-user",
+                    "occurredAt": "2026-09-21T12:00:00Z",
+                    "payload": {},
+                }
+            ],
+        )
+        link_external_work_evidence(
+            project_id="nebula-customer-platform",
+            connector="git",
+            external_id="commit:unlinked",
+            task_id="2.2",
+        )
+        evidence = workspace_snapshot()["externalWorkEvidence"]
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["task_id"], "2.2")
+
     def test_github_evidence_enters_inspection_loop(self) -> None:
         from backend.app.database import (
             initialize_database,

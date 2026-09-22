@@ -1478,6 +1478,52 @@ def replace_connector_evidence(
     return len(rows)
 
 
+def link_external_work_evidence(
+    *,
+    project_id: str,
+    connector: str,
+    external_id: str,
+    task_id: str,
+) -> None:
+    if (
+        connector not in VALID_CONNECTORS
+        or not external_id.strip()
+        or not task_id.strip()
+    ):
+        raise ValueError("invalid_external_evidence_link")
+    with connection() as db:
+        task_exists = db.execute(
+            """SELECT 1 FROM project_records
+               WHERE project_id = ? AND entity_type = 'task' AND id = ?""",
+            (project_id, task_id),
+        ).fetchone()
+        if not task_exists:
+            raise ValueError("task_not_found")
+        source = db.execute(
+            """SELECT 1 FROM external_work_evidence
+               WHERE project_id = ? AND connector = ? AND external_id = ?
+               LIMIT 1""",
+            (project_id, connector, external_id),
+        ).fetchone()
+        if not source:
+            raise ValueError("external_evidence_not_found")
+        db.execute(
+            """DELETE FROM external_work_evidence
+               WHERE project_id = ? AND connector = ? AND external_id = ?
+                 AND task_id = ?""",
+            (project_id, connector, external_id, task_id),
+        )
+        updated = db.execute(
+            """UPDATE external_work_evidence
+               SET task_id = ?, synced_at = CURRENT_TIMESTAMP
+               WHERE project_id = ? AND connector = ? AND external_id = ?
+                 AND task_id IS NULL""",
+            (task_id, project_id, connector, external_id),
+        ).rowcount
+        if not updated:
+            raise ValueError("external_evidence_already_linked")
+
+
 def upsert_automation_rule(
     *,
     project_id: str,

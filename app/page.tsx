@@ -154,6 +154,11 @@ type VersionScope = 'portfolio' | 'v0.9' | 'v1.0' | 'v1.1';
 type VersionId = Exclude<VersionScope, 'portfolio'>;
 const subscribeToClient = () => () => undefined;
 type DeliveryMode = 'agile' | 'waterfall';
+
+function suggestedChangeTarget(sourceVersion: VersionId): VersionId {
+  return sourceVersion === 'v0.9' ? 'v1.0' : 'v1.1';
+}
+
 type WorkspaceUser = {
   id: string;
   email: string;
@@ -161,6 +166,13 @@ type WorkspaceUser = {
   role: 'admin' | 'project_manager' | 'member' | 'viewer';
 };
 type DevelopmentIdentity = Omit<WorkspaceUser, 'role'>;
+type ProjectPermissionRecord = {
+  member_id: string;
+  project_id: string;
+  permission: 'manage_version' | 'approve_change' | 'approve_release';
+  version_id: VersionId | '*';
+  created_at: string;
+};
 
 type InspectionFinding = {
   fingerprint: string;
@@ -1590,29 +1602,25 @@ function buildChangeWbsDraft(
   targetVersion: ChangeRecord['targetVersion'],
   projectName: string,
 ): ChangeWbsDraftItem[] {
-  const windows = {
-    'v0.9': [
-      ['09/11', '09/12'],
-      ['09/13', '09/14'],
-      ['09/13', '09/14'],
-      ['09/15', '09/16'],
-      ['09/17', '09/18'],
-    ],
-    'v1.0': [
-      ['09/12', '09/13'],
-      ['09/14', '09/18'],
-      ['09/14', '09/18'],
-      ['09/21', '09/23'],
-      ['09/24', '09/26'],
-    ],
-    'v1.1': [
-      ['09/18', '09/19'],
-      ['09/21', '09/29'],
-      ['09/21', '09/28'],
-      ['10/08', '10/10'],
-      ['10/11', '10/16'],
-    ],
-  }[targetVersion];
+  const firstStart = dateKey(addChinaWorkdays(shanghaiNow().date, 1));
+  const inclusiveEnd = (start: string, duration: number) =>
+    dateKey(addChinaWorkdays(start, Math.max(0, duration - 1)));
+  const nextStart = (end: string) => dateKey(addChinaWorkdays(end, 1));
+  const requirementEnd = inclusiveEnd(firstStart, 2);
+  const developmentStart = nextStart(requirementEnd);
+  const backendEnd = inclusiveEnd(developmentStart, 5);
+  const frontendEnd = inclusiveEnd(developmentStart, 5);
+  const integrationStart = nextStart(backendEnd);
+  const integrationEnd = inclusiveEnd(integrationStart, 3);
+  const acceptanceStart = nextStart(integrationEnd);
+  const acceptanceEnd = inclusiveEnd(acceptanceStart, 5);
+  const windows = [
+    [firstStart, requirementEnd],
+    [developmentStart, backendEnd],
+    [developmentStart, frontendEnd],
+    [integrationStart, integrationEnd],
+    [acceptanceStart, acceptanceEnd],
+  ].map(([start, end]) => [isoDateToMonthDay(start), isoDateToMonthDay(end)]);
   const parentTaskId = `${change.id}-WBS`;
   const phases: Array<[string, string, string, TaskPriority, string, string]> =
     [
@@ -2045,6 +2053,9 @@ export default function Home() {
   const [workspaceMembers, setWorkspaceMembers] = useState<
     WorkspaceMemberSummary[]
   >([]);
+  const [workspacePermissions, setWorkspacePermissions] = useState<
+    ProjectPermissionRecord[]
+  >([]);
   const [workspaceRefresh, setWorkspaceRefresh] = useState(0);
   const [workspaceUser, setWorkspaceUser] = useState<WorkspaceUser>({
     id: 'local-user',
@@ -2199,12 +2210,14 @@ export default function Home() {
             taskHierarchy?: TaskHierarchyRecord[];
             versionConfigs?: VersionConfig[];
             inspectionFindings?: InspectionFinding[];
+            permissions?: ProjectPermissionRecord[];
           };
         };
         if (data.user) setWorkspaceUser(data.user);
         if (data.projectId) setCurrentProjectId(data.projectId);
         setProjects(data.projects ?? []);
         setWorkspaceMembers(data.workspaceMembers ?? []);
+        setWorkspacePermissions(data.snapshot?.permissions ?? []);
         if (data.snapshot?.tasks !== undefined) {
           const taskRecords = requireTaskRecords(data.snapshot.tasks);
           setWorkspaceTasks(taskRecords);
@@ -2302,6 +2315,20 @@ export default function Home() {
     setWbsChangeFocus('');
     setMilestoneFocus('');
     setRiskFocus('');
+  }
+
+  function hasProjectPermission(
+    permission: ProjectPermissionRecord['permission'],
+    versionId: VersionId,
+  ) {
+    if (workspaceUser.role === 'admin') return true;
+    return workspacePermissions.some(
+      (record) =>
+        record.member_id === workspaceUser.id &&
+        record.project_id === currentProjectId &&
+        record.permission === permission &&
+        (record.version_id === '*' || record.version_id === versionId),
+    );
   }
 
   async function projectChanged(projectId?: string) {
@@ -2473,12 +2500,7 @@ export default function Home() {
     setChangeDraft((current) => ({
       ...current,
       sourceVersion,
-      targetVersion:
-        sourceVersion === 'v0.9'
-          ? 'v1.0'
-          : sourceVersion === 'v1.0'
-            ? 'v1.1'
-            : 'v1.1',
+      targetVersion: suggestedChangeTarget(sourceVersion),
     }));
     setDialog('change');
   }
@@ -3128,6 +3150,12 @@ export default function Home() {
                 onChange={openChangeCreation}
                 versionScope={versionScope}
                 riskFocus={riskFocus}
+                canApproveChange={(versionId) =>
+                  hasProjectPermission('approve_change', versionId)
+                }
+                canManageVersion={(versionId) =>
+                  hasProjectPermission('manage_version', versionId)
+                }
                 onClearRiskFocus={() => setRiskFocus('')}
               />
             )}
@@ -3306,13 +3334,15 @@ export default function Home() {
             </NativeSelect>
             <NativeSelect
               value={changeDraft.sourceVersion}
-              onChange={(event) =>
+              onChange={(event) => {
+                const sourceVersion = event.target
+                  .value as ChangeRecord['sourceVersion'];
                 setChangeDraft({
                   ...changeDraft,
-                  sourceVersion: event.target
-                    .value as ChangeRecord['sourceVersion'],
-                })
-              }
+                  sourceVersion,
+                  targetVersion: suggestedChangeTarget(sourceVersion),
+                });
+              }}
               aria-label="变更来源版本"
             >
               <NativeSelectOption value="v0.9">
@@ -3340,6 +3370,11 @@ export default function Home() {
                 审核：项目委员会
               </NativeSelectOption>
             </NativeSelect>
+          </div>
+          <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+            初始建议目标版本：
+            <strong>{versionScopeLabels[changeDraft.targetVersion]}</strong>
+            。AI 评估后仍可在闭环台账中调整。
           </div>
           <Textarea
             className="min-h-24"
@@ -4981,6 +5016,8 @@ function RiskView({
   onChange,
   versionScope,
   riskFocus,
+  canApproveChange,
+  canManageVersion,
   onClearRiskFocus,
 }: {
   projectName: string;
@@ -4999,6 +5036,8 @@ function RiskView({
   onChange: () => void;
   versionScope: VersionScope;
   riskFocus: string;
+  canApproveChange: (versionId: VersionId) => boolean;
+  canManageVersion: (versionId: VersionId) => boolean;
   onClearRiskFocus: () => void;
 }) {
   const [scenarioDays, setScenarioDays] = useState(4);
@@ -5033,6 +5072,19 @@ function RiskView({
       change.sourceVersion === versionScope ||
       change.targetVersion === versionScope,
   );
+  const selectedTargetVersion = (change: ChangeRecord) =>
+    (changeTargets[change.id] ??
+      change.targetVersion) as ChangeRecord['targetVersion'];
+  const changePermissionHint = (change: ChangeRecord) => {
+    const targetVersion = selectedTargetVersion(change);
+    if (change.currentStep === 1 && !canApproveChange(targetVersion)) {
+      return `当前身份没有 ${versionScopeLabels[targetVersion]} 的需求变更审核权限，请系统管理员在“成员与权限”中授权。`;
+    }
+    if (change.currentStep === 2 && !canManageVersion(targetVersion)) {
+      return `当前身份没有 ${versionScopeLabels[targetVersion]} 的版本计划调整权限，请系统管理员在“成员与权限”中授权。`;
+    }
+    return '';
+  };
 
   const persistChange = useCallback(
     async (newChange: ChangeRecord) => {
@@ -5044,7 +5096,26 @@ function RiskView({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'update_change', change: newChange }),
         });
-        if (!response.ok) throw new Error('变更流程更新失败');
+        if (!response.ok) {
+          const result = (await response.json().catch(() => null)) as {
+            detail?: string;
+            message?: string;
+          } | null;
+          const detail = result?.detail ?? result?.message ?? '';
+          if (
+            response.status === 403 &&
+            (detail.includes('approve_change') ||
+              detail === 'project_permission_required')
+          ) {
+            throw new Error(
+              `当前身份没有 ${newChange.targetVersion} 需求变更审核权限，请联系系统管理员授权。`,
+            );
+          }
+          if (response.status === 403) {
+            throw new Error('当前身份无权执行此操作，请联系系统管理员授权。');
+          }
+          throw new Error(detail || '变更流程更新失败');
+        }
         onChangesChange(
           changesData.map((change) =>
             change.id === newChange.id ? newChange : change,
@@ -5276,7 +5347,20 @@ function RiskView({
           hierarchy,
         }),
       });
-      if (!response.ok) throw new Error('WBS 调整草案写入失败');
+      if (!response.ok) {
+        const result = (await response.json().catch(() => null)) as {
+          detail?: string;
+          message?: string;
+        } | null;
+        if (response.status === 403) {
+          throw new Error(
+            `当前身份没有 ${versionScopeLabels[targetVersion]} 的版本计划调整权限，请联系系统管理员授权。`,
+          );
+        }
+        throw new Error(
+          result?.detail ?? result?.message ?? 'WBS 调整草案写入失败',
+        );
+      }
       const existingIds = new Set(tasksData.map((task) => task[0]));
       onTasksChange([
         ...tasksData,
@@ -5515,6 +5599,14 @@ function RiskView({
           >
             查看全部风险
           </Button>
+        </div>
+      )}
+      {riskSaveError && !riskDialogOpen && (
+        <div
+          role="alert"
+          className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700"
+        >
+          {riskSaveError}
         </div>
       )}
       <div className="mb-5 grid gap-3 sm:grid-cols-4">
@@ -5783,6 +5875,11 @@ function RiskView({
                   最近记录：{change.history.at(-1)?.action} ·{' '}
                   {change.history.at(-1)?.actor} · {change.history.at(-1)?.at}
                 </span>
+                {changePermissionHint(change) && (
+                  <p className="basis-full rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    {changePermissionHint(change)}
+                  </p>
+                )}
                 {change.currentStep === 1 && (
                   <Button
                     size="sm"
@@ -5798,7 +5895,13 @@ function RiskView({
                   <Button
                     size="sm"
                     className={change.currentStep !== 1 ? 'ml-auto' : ''}
-                    disabled={savingChange === change.id}
+                    disabled={
+                      savingChange === change.id ||
+                      (change.currentStep === 1 &&
+                        !canApproveChange(selectedTargetVersion(change))) ||
+                      (change.currentStep === 2 &&
+                        !canManageVersion(selectedTargetVersion(change)))
+                    }
                     onClick={() => advanceChange(change)}
                   >
                     {savingChange === change.id

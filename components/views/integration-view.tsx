@@ -113,6 +113,7 @@ type WorkspacePayload = {
     inspectionFindings?: InspectionFinding[];
     inspectionRuns?: InspectionRun[];
     externalWorkEvidence?: ExternalWorkEvidence[];
+    tasks?: string[][];
   };
 };
 
@@ -257,6 +258,9 @@ export default function IntegrationView() {
   const [lookbackDays, setLookbackDays] = useState(30);
   const [resolving, setResolving] = useState<InspectionFinding | null>(null);
   const [resolutionNote, setResolutionNote] = useState('');
+  const [linkingEvidence, setLinkingEvidence] =
+    useState<ExternalWorkEvidence | null>(null);
+  const [linkTaskId, setLinkTaskId] = useState('');
   const [ruleDrafts, setRuleDrafts] = useState<
     Record<string, Record<string, unknown>>
   >({});
@@ -483,6 +487,29 @@ export default function IntegrationView() {
       await loadWorkspace();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '告警状态保存失败');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function linkEvidenceToTask() {
+    if (!linkingEvidence || !linkTaskId) return;
+    setBusy(`link-${linkingEvidence.external_id}`);
+    try {
+      await mutate({
+        action: 'link_external_evidence',
+        connector: linkingEvidence.connector,
+        entityId: linkingEvidence.external_id,
+        taskId: linkTaskId,
+      });
+      setNotice(
+        `已将“${linkingEvidence.title}”关联到 WBS ${linkTaskId}，并重新执行进度巡检。`,
+      );
+      setLinkingEvidence(null);
+      setLinkTaskId('');
+      await loadWorkspace();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '任务关联失败');
     } finally {
       setBusy('');
     }
@@ -901,30 +928,105 @@ export default function IntegrationView() {
                     </div>
                   ))}
                 </div>
-                {gitEvidence.slice(0, 5).map((item) => (
-                  <a
+                {gitEvidence.slice(0, 8).map((item) => (
+                  <div
                     key={`${item.external_id}-${item.task_id ?? 'unlinked'}`}
-                    href={item.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="block rounded-lg border p-2 transition-colors hover:bg-muted/60"
+                    className="flex items-start gap-2 rounded-lg border p-2"
                   >
-                    <span className="font-medium text-foreground">
-                      {item.task_id ? `${item.task_id} · ` : ''}
-                      {item.title}
-                    </span>
-                    <span className="mt-1 block text-[10px]">
-                      {item.evidence_type === 'pull_request' ? 'PR' : '提交'} ·{' '}
-                      {item.state} · {item.author || '未知作者'} ·{' '}
-                      {readableTime(item.occurred_at)}
-                    </span>
-                  </a>
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="min-w-0 flex-1 transition-colors hover:text-foreground"
+                    >
+                      <span className="font-medium text-foreground">
+                        {item.task_id ? `${item.task_id} · ` : ''}
+                        {item.title}
+                      </span>
+                      <span className="mt-1 block text-[10px]">
+                        {item.evidence_type === 'pull_request' ? 'PR' : '提交'}{' '}
+                        · {item.state} · {item.author || '未知作者'} ·{' '}
+                        {readableTime(item.occurred_at)}
+                      </span>
+                    </a>
+                    {!item.task_id && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="shrink-0"
+                        onClick={() => {
+                          setLinkingEvidence(item);
+                          setLinkTaskId('');
+                        }}
+                        disabled={!canManage || Boolean(busy)}
+                      >
+                        关联 WBS
+                      </Button>
+                    )}
+                  </div>
                 ))}
               </div>
             )}
           </CardContent>
         </Card>
       </div>
+
+      <Dialog
+        open={Boolean(linkingEvidence)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setLinkingEvidence(null);
+            setLinkTaskId('');
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>关联 Git 证据到 WBS</DialogTitle>
+            <DialogDescription>
+              关联后会立即重新巡检，用于判断代码进度是否与任务计划一致。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="rounded-lg bg-muted/60 p-3 text-xs leading-5">
+              <strong>{linkingEvidence?.title}</strong>
+              <p className="mt-1 text-muted-foreground">
+                {linkingEvidence?.evidence_type === 'pull_request'
+                  ? 'Pull Request'
+                  : '提交'}{' '}
+                · {linkingEvidence?.author || '未知作者'}
+              </p>
+            </div>
+            <label className="block text-xs font-medium">
+              选择 WBS 任务
+              <NativeSelect
+                className="mt-1 w-full"
+                value={linkTaskId}
+                onChange={(event) => setLinkTaskId(event.target.value)}
+                aria-label="选择要关联的 WBS 任务"
+              >
+                <NativeSelectOption value="">请选择任务</NativeSelectOption>
+                {(workspace?.snapshot.tasks ?? []).map((task) => (
+                  <NativeSelectOption key={task[0]} value={task[0]}>
+                    {task[0]} · {task[1]}（{task[3]}）
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setLinkingEvidence(null)}>
+              取消
+            </Button>
+            <Button
+              onClick={() => void linkEvidenceToTask()}
+              disabled={!linkTaskId || busy.startsWith('link-')}
+            >
+              {busy.startsWith('link-') ? '关联并巡检中…' : '确认关联并巡检'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={Boolean(configuring)}
@@ -1036,7 +1138,9 @@ export default function IntegrationView() {
             >
               {configMode === 'sandbox'
                 ? '沙箱只生成明确标记的本地连接测试和同步演练日志，不会访问或修改真实第三方数据。'
-                : '真实凭证请通过服务端环境变量配置；页面不会收集 App Secret、Token 或密码。当前适配器未启用时测试会明确失败。'}
+                : configuring === 'git'
+                  ? '公开 GitHub 仓库可免 Token 免费读取；私有仓库或更高调用额度请在服务端配置只读 GIT_ACCESS_TOKEN。页面不会收集或保存 Token。'
+                  : '真实凭证请通过服务端环境变量配置；页面不会收集 App Secret、Token 或密码。当前适配器未启用时测试会明确失败。'}
             </div>
           </div>
           <DialogFooter>
