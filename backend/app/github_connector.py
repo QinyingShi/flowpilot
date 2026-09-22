@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import ssl
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from http.client import IncompleteRead
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
@@ -19,6 +22,18 @@ class GitHubConnectorError(RuntimeError):
 class GitHubRepository:
     scope: str
     api_base_url: str
+
+
+def _tls_context() -> ssl.SSLContext:
+    candidates = [
+        os.getenv("SSL_CERT_FILE", ""),
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return ssl.create_default_context(cafile=candidate)
+    return ssl.create_default_context()
 
 
 def _repository(scope: str, base_url: str) -> GitHubRepository:
@@ -53,33 +68,38 @@ def _request_json(
     url = f"{repository.api_base_url}{path}"
     if query:
         url = f"{url}?{urlencode(query)}"
-    request = Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "FlowPilot-GitHub-Connector/0.2",
-            "X-GitHub-Api-Version": os.getenv(
-                "GITHUB_API_VERSION", "2026-03-10"
-            ),
-        },
-    )
-    try:
-        with urlopen(request, timeout=20) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        message = f"GitHub API 返回 HTTP {error.code}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "FlowPilot-GitHub-Connector/0.3",
+        "X-GitHub-Api-Version": os.getenv("GITHUB_API_VERSION", "2026-03-10"),
+    }
+    if token.strip():
+        headers["Authorization"] = f"Bearer {token.strip()}"
+    request = Request(url, headers=headers)
+    for attempt in range(3):
         try:
-            payload = json.loads(error.read().decode("utf-8"))
-            if isinstance(payload.get("message"), str):
-                message = f"{message}：{payload['message'][:180]}"
-        except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
-            pass
-        raise GitHubConnectorError(message) from error
-    except (URLError, TimeoutError) as error:
-        raise GitHubConnectorError("无法连接 GitHub API，请检查网络与服务地址") from error
-    except json.JSONDecodeError as error:
-        raise GitHubConnectorError("GitHub API 返回了无法解析的数据") from error
+            with urlopen(request, timeout=20, context=_tls_context()) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            message = f"GitHub API 返回 HTTP {error.code}"
+            try:
+                payload = json.loads(error.read().decode("utf-8"))
+                if isinstance(payload.get("message"), str):
+                    message = f"{message}：{payload['message'][:180]}"
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                pass
+            if error.code == 403 and not token.strip():
+                message = f"{message}；公共免 Token 额度可能已用尽，可配置只读 GIT_ACCESS_TOKEN 后重试"
+            raise GitHubConnectorError(message) from error
+        except (URLError, TimeoutError, IncompleteRead, ConnectionError) as error:
+            if attempt == 2:
+                raise GitHubConnectorError(
+                    "无法连接 GitHub API，请检查网络与服务地址"
+                ) from error
+            time.sleep(0.2 * (attempt + 1))
+        except json.JSONDecodeError as error:
+            raise GitHubConnectorError("GitHub API 返回了无法解析的数据") from error
+    raise GitHubConnectorError("无法连接 GitHub API，请检查网络与服务地址")
 
 
 def test_github_connection(

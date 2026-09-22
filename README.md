@@ -104,10 +104,12 @@ npm run local
 
 如启用 GitHub 真实同步：
 
-- 在服务端设置 `GIT_ACCESS_TOKEN`，不要把 Token 填入页面或提交到仓库
+- 公共仓库可以免 Token 免费读取；私有仓库或需要更高 API 额度时，再在服务端设置 `GIT_ACCESS_TOKEN`
+- 不要把 Token 填入页面或提交到仓库
 - 私有仓库建议使用细粒度 Token，并只授予 Contents（只读）和 Pull requests（只读）权限
 - 在“集成与自动化中心”将 Git 设为“真实第三方”，仓库填写 `owner/repository`
 - 提交信息或 PR 标题/描述引用 WBS 编号后，系统才会建立任务进度证据
+- 未自动识别任务编号的提交或 PR，可在“进度与质量数据”中人工关联 WBS，关联后会立即重新巡检
 
 不要提交 `.env`、数据库、上传文件、第三方凭证或真实组织数据。`npm run dev` 会读取根目录的 `.env` 和 `.env.local`，已有系统环境变量优先。
 

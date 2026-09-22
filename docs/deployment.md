@@ -30,8 +30,9 @@ API 进程，而不是创建第二个 Worker 服务。该模式仍限定单实�
 - `PROJECT_BOOTSTRAP_ADMIN_EMAIL`：首位系统管理员的真实邮箱。
 - `PROJECT_CORS_ORIGINS`：最终 Sites 站点的 HTTPS Origin。
 
-GitHub 私有仓库连接和 AI 文档分析默认关闭。需要时再在服务 Environment 中增加
-`GIT_ACCESS_TOKEN` 或 `OPENAI_API_KEY`，避免首次部署被非必填凭证阻塞。
+GitHub 公共仓库可免 Token 读取。私有仓库连接和 AI 文档分析默认关闭；需要时再在
+服务 Environment 中增加 `GIT_ACCESS_TOKEN` 或 `OPENAI_API_KEY`，避免首次部署被
+非必填凭证阻塞。
 
 `PROJECT_API_PROXY_SECRET` 由 Render 自动生成。首次创建后从 Render 环境变量中复制
 该值，作为 Sites 的同名 Secret。部署完成后访问 `/health/ready`，确认返回
