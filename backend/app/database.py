@@ -399,7 +399,12 @@ DEFAULT_AUTOMATION_RULES = [
     ("task_assignment", True, "workspace", {"sendImmediately": True}),
     ("progress_drift", True, "workspace", {"thresholdPercent": 5}),
     ("due_reminder", True, "workspace", {"leadHours": 24, "repeatHours": 12}),
-    ("git_verification", True, "workspace", {"staleHours": 24}),
+    (
+        "git_verification",
+        True,
+        "workspace",
+        {"staleHours": 24, "syncIntervalMinutes": 30},
+    ),
     ("quality_warning", True, "workspace", {"p1Limit": 3, "reopenRate": 10}),
     (
         "ai_inspection",
@@ -429,6 +434,35 @@ def _insert_default_automation_rules(
             for rule_key, enabled, channel, config in DEFAULT_AUTOMATION_RULES
         ],
     )
+
+
+def _merge_automation_rule_defaults(db: sqlite3.Connection) -> None:
+    """Add newly introduced defaults without overwriting user choices."""
+    defaults = {rule_key: config for rule_key, _, _, config in DEFAULT_AUTOMATION_RULES}
+    rows = db.execute(
+        "SELECT project_id, rule_key, rule_json FROM automation_rules"
+    ).fetchall()
+    for row in rows:
+        default_config = defaults.get(str(row["rule_key"]))
+        if default_config is None:
+            continue
+        try:
+            current_config = json.loads(row["rule_json"] or "{}")
+        except json.JSONDecodeError:
+            current_config = {}
+        merged_config = {**default_config, **current_config}
+        if merged_config == current_config:
+            continue
+        db.execute(
+            """UPDATE automation_rules
+               SET rule_json = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE project_id = ? AND rule_key = ?""",
+            (
+                json.dumps(merged_config, ensure_ascii=False),
+                row["project_id"],
+                row["rule_key"],
+            ),
+        )
 
 
 def database_path() -> Path:
@@ -755,6 +789,7 @@ def initialize_database() -> None:
             ),
         )
         _insert_default_automation_rules(db, PROJECT_ID, "system")
+        _merge_automation_rule_defaults(db)
         seed_data = (
             json.loads(SEED_DATA_PATH.read_text(encoding="utf-8"))
             if seed_demo_data
@@ -1780,6 +1815,17 @@ def run_project_inspection(
             if git_rule and git_rule["enabled"]
             else []
         )
+        git_connector = (
+            db.execute(
+                """SELECT status, last_synced_at, last_error
+                   FROM connector_configs
+                   WHERE project_id = ? AND connector = 'git'
+                     AND mode = 'live'""",
+                (project_id,),
+            ).fetchone()
+            if git_rule and git_rule["enabled"]
+            else None
+        )
         config = json.loads(rule["rule_json"]) if rule else {}
         findings = _inspection_candidates(
             records["task"],
@@ -1789,6 +1835,66 @@ def run_project_inspection(
             config,
             external_evidence,
         )
+        git_config = json.loads(git_rule["rule_json"] or "{}") if git_rule else {}
+        if git_connector:
+            connector_status = str(git_connector["status"])
+            if connector_status == "error":
+                findings.append(
+                    {
+                        "fingerprint": "connector_sync_failure:git",
+                        "findingType": "risk",
+                        "severity": "high",
+                        "title": "Git 自动同步失败",
+                        "detail": str(
+                            git_connector["last_error"]
+                            or "Git 连接器返回未知错误。"
+                        ),
+                        "owner": "系统管理员",
+                        "recommendation": "检查网络、仓库地址及访问凭证；恢复连接后系统会在下个周期自动重试并复核告警。",
+                        "sourceRefs": [{"type": "connector", "id": "git"}],
+                    }
+                )
+            elif connector_status == "connected":
+                last_synced_at = git_connector["last_synced_at"]
+                stale_hours = max(1, int(git_config.get("staleHours", 24)))
+                sync_age_hours: int | None = None
+                if last_synced_at:
+                    try:
+                        synced_at = datetime.fromisoformat(
+                            str(last_synced_at)
+                            .replace(" ", "T")
+                            .replace("Z", "+00:00")
+                        )
+                        if synced_at.tzinfo is None:
+                            synced_at = synced_at.replace(tzinfo=timezone.utc)
+                        sync_age_hours = int(
+                            (
+                                datetime.now(timezone.utc)
+                                - synced_at.astimezone(timezone.utc)
+                            ).total_seconds()
+                            / 3600
+                        )
+                    except ValueError:
+                        sync_age_hours = stale_hours + 1
+                if sync_age_hours is None or sync_age_hours > stale_hours:
+                    findings.append(
+                        {
+                            "fingerprint": "connector_sync_stale:git",
+                            "findingType": "risk",
+                            "severity": "medium",
+                            "title": "Git 进度证据未及时同步",
+                            "detail": (
+                                "Git 连接已建立，但尚未完成首次同步。"
+                                if sync_age_hours is None
+                                else f"最近一次 Git 同步距今约 {sync_age_hours} 小时，超过 {stale_hours} 小时阈值。"
+                            ),
+                            "owner": "系统管理员",
+                            "recommendation": "立即检查自动同步状态；必要时手动同步，并确认后台巡检服务持续运行。",
+                            "sourceRefs": [
+                                {"type": "connector", "id": "git"}
+                            ],
+                        }
+                    )
         fingerprints = {item["fingerprint"] for item in findings}
         for finding in findings:
             db.execute(
@@ -1899,6 +2005,60 @@ def projects_due_for_inspection() -> list[str]:
             )
             if (now - last_run).total_seconds() >= interval * 60:
                 due.append(row["project_id"])
+    return due
+
+
+def projects_due_for_git_sync(
+    now: datetime | None = None,
+) -> list[str]:
+    """Return active projects whose live Git connector should sync now."""
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    due: list[str] = []
+    with connection() as db:
+        rows = db.execute(
+            """SELECT cc.project_id, cc.status, cc.last_tested_at,
+                      cc.last_synced_at, ar.rule_json
+               FROM connector_configs cc
+               JOIN automation_rules ar
+                 ON ar.project_id = cc.project_id
+                AND ar.rule_key = 'git_verification'
+                AND ar.enabled = 1
+               JOIN projects p
+                 ON p.id = cc.project_id AND p.status = 'active'
+               WHERE cc.connector = 'git'
+                 AND cc.mode = 'live'
+                 AND cc.status IN ('connected', 'error')"""
+        ).fetchall()
+        for row in rows:
+            try:
+                config = json.loads(row["rule_json"] or "{}")
+            except json.JSONDecodeError:
+                config = {}
+            interval = max(
+                5,
+                min(24 * 60, int(config.get("syncIntervalMinutes", 30))),
+            )
+            anchor_value = (
+                row["last_tested_at"]
+                if row["status"] == "error"
+                else row["last_synced_at"]
+            )
+            if not anchor_value:
+                due.append(str(row["project_id"]))
+                continue
+            try:
+                anchor = datetime.fromisoformat(
+                    str(anchor_value).replace(" ", "T").replace("Z", "+00:00")
+                )
+            except ValueError:
+                due.append(str(row["project_id"]))
+                continue
+            if anchor.tzinfo is None:
+                anchor = anchor.replace(tzinfo=timezone.utc)
+            if (current_time - anchor.astimezone(timezone.utc)).total_seconds() >= interval * 60:
+                due.append(str(row["project_id"]))
     return due
 
 

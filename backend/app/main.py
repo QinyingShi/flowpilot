@@ -32,7 +32,6 @@ from .database import (
     member_has_permission,
     member_has_project_access,
     record_milestone_actual,
-    replace_connector_evidence,
     save_plan_baseline,
     set_connector_status,
     upsert_project_record,
@@ -48,9 +47,9 @@ from .database import (
     upsert_tasks_with_hierarchy,
     workspace_snapshot,
 )
+from .connector_sync import sync_project_github_evidence
 from .github_connector import (
     GitHubConnectorError,
-    sync_github_evidence,
     test_github_connection,
 )
 from .inspection_worker import run_due_projects
@@ -757,87 +756,24 @@ def mutate_workspace(
             if config["status"] != "connected":
                 raise HTTPException(status_code=409, detail="connector_not_connected")
             if config["mode"] == "live" and connector == "git":
-                token = os.getenv("GIT_ACCESS_TOKEN", "")
-                options = json.loads(config["config_json"] or "{}")
-                snapshot = workspace_snapshot(project_id)
-                task_ids = [
-                    str(task[0])
-                    for task in snapshot.get("tasks", [])
-                    if isinstance(task, list) and task
-                ]
                 try:
-                    result = sync_github_evidence(
-                        base_url=str(config["base_url"]),
-                        scope=str(options.get("scope", "")),
-                        token=token,
-                        task_ids=task_ids,
-                        lookback_days=int(options.get("lookbackDays", 30)),
-                    )
-                    stored = replace_connector_evidence(
-                        project_id=project_id,
-                        connector=connector,
-                        evidence=result["evidence"],
-                    )
-                    inspection = run_project_inspection(
+                    result = sync_project_github_evidence(
                         project_id=project_id,
                         trigger_type="manual",
                         actor_id="github-connector",
                     )
                 except (GitHubConnectorError, ValueError) as error:
                     detail = str(error)
-                    set_connector_status(
-                        project_id=project_id,
-                        connector=connector,
-                        status="error",
-                        error=detail,
-                    )
-                    append_sync_event(
-                        project_id=project_id,
-                        connector=connector,
-                        direction="inbound",
-                        entity_type="progress_evidence",
-                        status="failed",
-                        detail=detail,
-                    )
                     raise HTTPException(status_code=502, detail=detail) from error
-                detail = (
-                    f"GitHub 同步完成：{result['commits']} 个提交、"
-                    f"{result['pullRequests']} 个 PR；{result['linked']} 条记录命中任务编号，"
-                    f"{result['unlinked']} 条待人工关联"
-                )
-                set_connector_status(
-                    project_id=project_id,
-                    connector=connector,
-                    status="connected",
-                    synced=True,
-                )
-                append_sync_event(
-                    project_id=project_id,
-                    connector=connector,
-                    direction="inbound",
-                    entity_type="progress_evidence",
-                    status="success",
-                    detail=detail,
-                )
                 append_project_audit_log(
                     actor_id=user["id"],
                     actor_type="connector",
                     action=body.action,
                     entity_type="progress_evidence",
                     entity_id=connector,
-                    detail=detail,
+                    detail=result["detail"],
                 )
-                return {
-                    "ok": True,
-                    "connector": connector,
-                    "count": stored,
-                    "detail": detail,
-                    "inspection": {
-                        "id": inspection["id"],
-                        "total": inspection["total"],
-                    },
-                    **{key: value for key, value in result.items() if key != "evidence"},
-                }
+                return {"ok": True, **result}
             if config["mode"] != "sandbox":
                 raise HTTPException(status_code=409, detail="live_sync_not_available")
             demo_counts = {

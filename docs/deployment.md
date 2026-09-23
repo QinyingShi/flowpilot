@@ -11,9 +11,10 @@ FlowPilot 当前生产拓扑由两个部分组成：
 
 ## 零费用方案：本机运行
 
-当前无需公网服务时，推荐直接运行 `npm run local`。它使用本地数据库、内嵌巡检调度
-器，并在启动时及每 24 小时调用 SQLite backup API，把数据库和上传文件保存到
-`backups/`。也可随时运行 `npm run backup` 手动备份。
+当前无需公网服务时，推荐直接运行 `npm run local`。它使用本地数据库、内嵌巡检与
+Git 定时同步调度器，并在启动时及每 24 小时调用 SQLite backup API，把数据库和上传
+文件保存到 `backups/`。同步间隔在“Git 进度核验”规则中配置；失败会记录告警并在下个
+周期重试。也可随时运行 `npm run backup` 手动备份。
 
 在 `.env.local` 设置 `FLOWPILOT_LAN_ACCESS=true` 后，同一可信局域网中的设备可通过
 Mac 的局域网 IP 和 3001 端口访问。主机必须保持开机，macOS 防火墙也需要允许 Node

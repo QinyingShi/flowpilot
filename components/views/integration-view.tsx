@@ -206,9 +206,9 @@ const ruleDefinitions = [
   [
     'git_verification',
     'Git 进度核验',
-    '提交与 PR 未覆盖计划任务时预警',
-    'staleHours',
-    '无提交小时数',
+    '定时同步提交与 PR，并在证据异常时预警',
+    'syncIntervalMinutes',
+    '自动同步间隔（分钟）',
   ],
   [
     'quality_warning',
@@ -234,9 +234,42 @@ function parseJson(value: string) {
   }
 }
 
+function serverDate(value?: string | null) {
+  if (!value) return null;
+  const normalized = value.includes('T')
+    ? value
+    : `${value.replace(' ', 'T')}Z`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function readableTime(value?: string | null) {
   if (!value) return '尚未执行';
-  return value.replace('T', ' ').slice(0, 16);
+  const parsed = serverDate(value);
+  if (!parsed) return value.replace('T', ' ').slice(0, 16);
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(parsed);
+}
+
+function gitScheduleLabel(config: ConnectorConfig, rule?: AutomationRule) {
+  if (config.mode !== 'live' || !rule?.enabled) return '自动同步：未开启';
+  const ruleConfig = parseJson(rule.rule_json);
+  const interval = Number(ruleConfig.syncIntervalMinutes) || 30;
+  const anchor = serverDate(
+    config.status === 'error' ? config.last_tested_at : config.last_synced_at,
+  );
+  if (!anchor) return `自动同步：每 ${interval} 分钟 · 等待首次执行`;
+  const nextSync = new Date(anchor.getTime() + interval * 60 * 1000);
+  if (nextSync.getTime() <= Date.now()) {
+    return `自动同步：每 ${interval} 分钟 · 后台即将执行`;
+  }
+  return `${config.status === 'error' ? '自动重试' : '下次同步'}：${readableTime(nextSync.toISOString())}`;
 }
 
 function scalarText(value: unknown) {
@@ -289,12 +322,11 @@ export default function IntegrationView() {
 
   useEffect(() => {
     let active = true;
-    void fetch('/api/workspace', { cache: 'no-store' })
-      .then(async (response) => {
+    async function refreshWorkspace(initial = false) {
+      try {
+        const response = await fetch('/api/workspace', { cache: 'no-store' });
         if (!response.ok) throw new Error('工作台数据读取失败');
-        return (await response.json()) as WorkspacePayload;
-      })
-      .then((payload) => {
+        const payload = (await response.json()) as WorkspacePayload;
         if (!active) return;
         setWorkspace(payload);
         setRuleDrafts(
@@ -305,16 +337,18 @@ export default function IntegrationView() {
             ]),
           ),
         );
-      })
-      .catch((error: unknown) => {
+      } catch (error) {
         if (active)
           setNotice(error instanceof Error ? error.message : '加载失败');
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+      } finally {
+        if (active && initial) setLoading(false);
+      }
+    }
+    void refreshWorkspace(true);
+    const timer = window.setInterval(() => void refreshWorkspace(), 30_000);
     return () => {
       active = false;
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -611,6 +645,11 @@ export default function IntegrationView() {
                 <p className="mt-3 text-[10px] text-muted-foreground">
                   最近同步：{readableTime(config?.last_synced_at)}
                 </p>
+                {definition.id === 'git' && config && (
+                  <p className="mt-1 text-[10px] font-medium text-blue-700">
+                    {gitScheduleLabel(config, ruleMap.get('git_verification'))}
+                  </p>
+                )}
                 {config?.last_error && (
                   <p className="mt-2 text-[10px] leading-4 text-rose-600">
                     {config.last_error}
