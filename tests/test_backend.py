@@ -1792,6 +1792,177 @@ class BackendDatabaseTests(unittest.TestCase):
             )
         )
 
+    def test_git_auto_sync_schedule_respects_interval_and_rule(self) -> None:
+        from datetime import datetime, timezone
+
+        from backend.app.database import (
+            PROJECT_ID,
+            initialize_database,
+            projects_due_for_git_sync,
+            set_connector_status,
+            upsert_automation_rule,
+            upsert_connector_config,
+        )
+
+        initialize_database()
+        upsert_connector_config(
+            project_id=PROJECT_ID,
+            connector="git",
+            mode="live",
+            display_name="GitHub",
+            base_url="https://github.com",
+            config={"scope": "acme/flowpilot", "lookbackDays": 30},
+            actor_id="tester",
+        )
+        set_connector_status(
+            project_id=PROJECT_ID,
+            connector="git",
+            status="connected",
+        )
+        self.assertIn(PROJECT_ID, projects_due_for_git_sync())
+
+        set_connector_status(
+            project_id=PROJECT_ID,
+            connector="git",
+            status="connected",
+            synced=True,
+        )
+        self.assertNotIn(PROJECT_ID, projects_due_for_git_sync())
+
+        upsert_automation_rule(
+            project_id=PROJECT_ID,
+            rule_key="git_verification",
+            enabled=True,
+            channel="workspace",
+            config={"staleHours": 24, "syncIntervalMinutes": 30},
+            actor_id="tester",
+        )
+        with sqlite3.connect(os.environ["PROJECT_DB_PATH"]) as database:
+            database.execute(
+                """UPDATE connector_configs
+                   SET last_synced_at = '2026-09-23 00:00:00'
+                   WHERE project_id = ? AND connector = 'git'""",
+                (PROJECT_ID,),
+            )
+        self.assertIn(
+            PROJECT_ID,
+            projects_due_for_git_sync(
+                datetime(2026, 9, 23, 0, 31, tzinfo=timezone.utc)
+            ),
+        )
+
+        upsert_automation_rule(
+            project_id=PROJECT_ID,
+            rule_key="git_verification",
+            enabled=False,
+            channel="workspace",
+            config={"staleHours": 24, "syncIntervalMinutes": 30},
+            actor_id="tester",
+        )
+        self.assertNotIn(
+            PROJECT_ID,
+            projects_due_for_git_sync(
+                datetime(2026, 9, 23, 1, 0, tzinfo=timezone.utc)
+            ),
+        )
+
+    def test_git_auto_sync_failure_and_recovery_close_warning(self) -> None:
+        from unittest.mock import patch
+
+        from backend.app.connector_sync import sync_project_github_evidence
+        from backend.app.database import (
+            PROJECT_ID,
+            initialize_database,
+            set_connector_status,
+            upsert_connector_config,
+            workspace_snapshot,
+        )
+        from backend.app.github_connector import GitHubConnectorError
+
+        initialize_database()
+        upsert_connector_config(
+            project_id=PROJECT_ID,
+            connector="git",
+            mode="live",
+            display_name="GitHub",
+            base_url="https://github.com",
+            config={"scope": "acme/flowpilot", "lookbackDays": 30},
+            actor_id="tester",
+        )
+        set_connector_status(
+            project_id=PROJECT_ID,
+            connector="git",
+            status="connected",
+        )
+        with patch(
+            "backend.app.connector_sync.sync_github_evidence",
+            side_effect=GitHubConnectorError("GitHub 暂时不可达"),
+        ):
+            with self.assertRaises(GitHubConnectorError):
+                sync_project_github_evidence(
+                    project_id=PROJECT_ID,
+                    trigger_type="scheduled",
+                    actor_id="git-sync-worker",
+                    allow_error_retry=True,
+                )
+
+        failed_snapshot = workspace_snapshot()
+        failed_config = next(
+            item
+            for item in failed_snapshot["connectorConfigs"]
+            if item["connector"] == "git"
+        )
+        self.assertEqual(failed_config["status"], "error")
+        self.assertTrue(
+            any(
+                item["fingerprint"] == "connector_sync_failure:git"
+                and item["status"] == "open"
+                for item in failed_snapshot["inspectionFindings"]
+            )
+        )
+        self.assertTrue(
+            any(
+                item["status"] == "failed" and "自动同步失败" in item["detail"]
+                for item in failed_snapshot["syncEvents"]
+            )
+        )
+
+        recovered_payload = {
+            "repository": "acme/flowpilot",
+            "evidence": [],
+            "commits": 0,
+            "pullRequests": 0,
+            "linked": 0,
+            "unlinked": 0,
+            "lookbackDays": 30,
+        }
+        with patch(
+            "backend.app.connector_sync.sync_github_evidence",
+            return_value=recovered_payload,
+        ):
+            result = sync_project_github_evidence(
+                project_id=PROJECT_ID,
+                trigger_type="scheduled",
+                actor_id="git-sync-worker",
+                allow_error_retry=True,
+            )
+        self.assertEqual(result["count"], 0)
+        recovered_snapshot = workspace_snapshot()
+        recovered_config = next(
+            item
+            for item in recovered_snapshot["connectorConfigs"]
+            if item["connector"] == "git"
+        )
+        self.assertEqual(recovered_config["status"], "connected")
+        self.assertTrue(recovered_config["last_synced_at"])
+        self.assertTrue(
+            any(
+                item["fingerprint"] == "connector_sync_failure:git"
+                and item["status"] == "resolved"
+                for item in recovered_snapshot["inspectionFindings"]
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
