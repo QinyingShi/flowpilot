@@ -186,6 +186,33 @@ CREATE INDEX IF NOT EXISTS idx_external_work_evidence_task_time
 CREATE INDEX IF NOT EXISTS idx_external_work_evidence_connector_time
   ON external_work_evidence(project_id, connector, occurred_at DESC);
 
+CREATE TABLE IF NOT EXISTS external_quality_issues (
+  project_id TEXT NOT NULL,
+  connector TEXT NOT NULL DEFAULT 'jira',
+  external_id TEXT NOT NULL,
+  issue_key TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('P0', 'P1', 'P2', 'P3')),
+  status TEXT NOT NULL,
+  status_category TEXT NOT NULL CHECK (status_category IN ('todo', 'in_progress', 'done')),
+  assignee TEXT NOT NULL DEFAULT '',
+  version_id TEXT,
+  task_id TEXT,
+  reopen_count INTEGER NOT NULL DEFAULT 0,
+  due_date TEXT,
+  created_at_external TEXT NOT NULL,
+  updated_at_external TEXT NOT NULL,
+  resolved_at TEXT,
+  url TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(project_id, connector, external_id)
+);
+CREATE INDEX IF NOT EXISTS idx_quality_issues_project_version_status
+  ON external_quality_issues(project_id, version_id, status_category, severity);
+CREATE INDEX IF NOT EXISTS idx_quality_issues_project_task
+  ON external_quality_issues(project_id, task_id, updated_at_external DESC);
+
 CREATE TABLE IF NOT EXISTS connector_configs (
   project_id TEXT NOT NULL,
   connector TEXT NOT NULL,
@@ -405,7 +432,12 @@ DEFAULT_AUTOMATION_RULES = [
         "workspace",
         {"staleHours": 24, "syncIntervalMinutes": 30},
     ),
-    ("quality_warning", True, "workspace", {"p1Limit": 3, "reopenRate": 10}),
+    (
+        "quality_warning",
+        True,
+        "workspace",
+        {"p0Limit": 0, "p1Limit": 3, "reopenRate": 10, "syncIntervalMinutes": 30},
+    ),
     (
         "ai_inspection",
         True,
@@ -1559,6 +1591,115 @@ def link_external_work_evidence(
             raise ValueError("external_evidence_already_linked")
 
 
+def replace_connector_quality_issues(
+    *,
+    project_id: str,
+    connector: str,
+    issues: list[dict[str, Any]],
+) -> int:
+    if connector != "jira":
+        raise ValueError("invalid_quality_connector")
+    with connection() as db:
+        existing_links = {
+            str(row["external_id"]): str(row["task_id"])
+            for row in db.execute(
+                """SELECT external_id, task_id FROM external_quality_issues
+                   WHERE project_id = ? AND connector = ? AND task_id IS NOT NULL""",
+                (project_id, connector),
+            ).fetchall()
+        }
+        rows: list[tuple[Any, ...]] = []
+        for item in issues:
+            severity = str(item.get("severity", "P3"))
+            status_category = str(item.get("statusCategory", "todo"))
+            if severity not in {"P0", "P1", "P2", "P3"} or status_category not in {
+                "todo",
+                "in_progress",
+                "done",
+            }:
+                raise ValueError("invalid_quality_issue")
+            external_id = str(item.get("externalId", "")).strip()
+            issue_key = str(item.get("issueKey", "")).strip()
+            if not external_id or not issue_key:
+                raise ValueError("invalid_quality_issue")
+            task_id = str(item.get("taskId") or "").strip() or existing_links.get(
+                external_id
+            )
+            rows.append(
+                (
+                    project_id,
+                    connector,
+                    external_id,
+                    issue_key,
+                    str(item.get("summary", "")),
+                    severity,
+                    str(item.get("status", "")),
+                    status_category,
+                    str(item.get("assignee", "")),
+                    str(item.get("versionId") or "") or None,
+                    task_id or None,
+                    max(0, int(item.get("reopenCount", 0))),
+                    str(item.get("dueDate") or "") or None,
+                    str(item.get("createdAt", "")),
+                    str(item.get("updatedAt", "")),
+                    str(item.get("resolvedAt") or "") or None,
+                    str(item.get("url", "")),
+                    json.dumps(item.get("payload", {}), ensure_ascii=False),
+                )
+            )
+        if rows:
+            db.executemany(
+                """INSERT INTO external_quality_issues
+                  (project_id, connector, external_id, issue_key, summary,
+                   severity, status, status_category, assignee, version_id,
+                   task_id, reopen_count, due_date, created_at_external,
+                   updated_at_external, resolved_at, url, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, connector, external_id) DO UPDATE SET
+                  issue_key = excluded.issue_key,
+                  summary = excluded.summary,
+                  severity = excluded.severity,
+                  status = excluded.status,
+                  status_category = excluded.status_category,
+                  assignee = excluded.assignee,
+                  version_id = excluded.version_id,
+                  task_id = COALESCE(external_quality_issues.task_id, excluded.task_id),
+                  reopen_count = excluded.reopen_count,
+                  due_date = excluded.due_date,
+                  created_at_external = excluded.created_at_external,
+                  updated_at_external = excluded.updated_at_external,
+                  resolved_at = excluded.resolved_at,
+                  url = excluded.url,
+                  payload_json = excluded.payload_json,
+                  synced_at = CURRENT_TIMESTAMP""",
+                rows,
+            )
+    return len(rows)
+
+
+def link_external_quality_issue(
+    *, project_id: str, external_id: str, task_id: str
+) -> None:
+    if not external_id.strip() or not task_id.strip():
+        raise ValueError("invalid_quality_issue_link")
+    with connection() as db:
+        task_exists = db.execute(
+            """SELECT 1 FROM project_records
+               WHERE project_id = ? AND entity_type = 'task' AND id = ?""",
+            (project_id, task_id),
+        ).fetchone()
+        if not task_exists:
+            raise ValueError("task_not_found")
+        updated = db.execute(
+            """UPDATE external_quality_issues
+               SET task_id = ?, synced_at = CURRENT_TIMESTAMP
+               WHERE project_id = ? AND connector = 'jira' AND external_id = ?""",
+            (task_id, project_id, external_id),
+        ).rowcount
+        if not updated:
+            raise ValueError("quality_issue_not_found")
+
+
 def upsert_automation_rule(
     *,
     project_id: str,
@@ -1779,6 +1920,11 @@ def run_project_inspection(
                WHERE project_id = ? AND rule_key = 'git_verification'""",
             (project_id,),
         ).fetchone()
+        quality_rule = db.execute(
+            """SELECT enabled, rule_json FROM automation_rules
+               WHERE project_id = ? AND rule_key = 'quality_warning'""",
+            (project_id,),
+        ).fetchone()
         if trigger_type == "scheduled" and (not rule or not rule["enabled"]):
             db.execute(
                 """INSERT INTO inspection_runs
@@ -1824,6 +1970,30 @@ def run_project_inspection(
                 (project_id,),
             ).fetchone()
             if git_rule and git_rule["enabled"]
+            else None
+        )
+        quality_issues = (
+            _rows(
+                db,
+                """SELECT external_id, issue_key, summary, severity, status,
+                          status_category, assignee, version_id, task_id,
+                          reopen_count, due_date, updated_at_external, url
+                   FROM external_quality_issues
+                   WHERE project_id = ? AND connector = 'jira'""",
+                (project_id,),
+            )
+            if quality_rule and quality_rule["enabled"]
+            else []
+        )
+        jira_connector = (
+            db.execute(
+                """SELECT status, last_synced_at, last_error
+                   FROM connector_configs
+                   WHERE project_id = ? AND connector = 'jira'
+                     AND mode = 'live'""",
+                (project_id,),
+            ).fetchone()
+            if quality_rule and quality_rule["enabled"]
             else None
         )
         config = json.loads(rule["rule_json"]) if rule else {}
@@ -1895,6 +2065,71 @@ def run_project_inspection(
                             ],
                         }
                     )
+        quality_config = (
+            json.loads(quality_rule["rule_json"] or "{}") if quality_rule else {}
+        )
+        if jira_connector and str(jira_connector["status"]) == "error":
+            findings.append(
+                {
+                    "fingerprint": "connector_sync_failure:jira",
+                    "findingType": "risk",
+                    "severity": "high",
+                    "title": "Jira 自动同步失败",
+                    "detail": str(
+                        jira_connector["last_error"] or "Jira 连接器返回未知错误。"
+                    ),
+                    "owner": "系统管理员",
+                    "recommendation": "检查 Jira 地址、项目代码、服务账号和 API Token；恢复后系统会自动重试并复核质量告警。",
+                    "sourceRefs": [{"type": "connector", "id": "jira"}],
+                }
+            )
+        issues_by_version: dict[str, list[dict[str, Any]]] = {}
+        for issue in quality_issues:
+            version_id = str(issue.get("version_id") or "未分配版本")
+            issues_by_version.setdefault(version_id, []).append(issue)
+        for version_id, version_issues in issues_by_version.items():
+            active_issues = [
+                issue
+                for issue in version_issues
+                if issue.get("status_category") != "done"
+            ]
+            p0_count = sum(
+                1 for issue in active_issues if issue.get("severity") == "P0"
+            )
+            p1_count = sum(
+                1 for issue in active_issues if issue.get("severity") == "P1"
+            )
+            reopened_count = sum(
+                1 for issue in version_issues if int(issue.get("reopen_count") or 0) > 0
+            )
+            reopen_rate = round(reopened_count * 100 / max(1, len(version_issues)))
+            p0_limit = max(0, int(quality_config.get("p0Limit", 0)))
+            p1_limit = max(0, int(quality_config.get("p1Limit", 3)))
+            reopen_limit = max(0, int(quality_config.get("reopenRate", 10)))
+            if (
+                p0_count <= p0_limit
+                and p1_count <= p1_limit
+                and reopen_rate <= reopen_limit
+            ):
+                continue
+            findings.append(
+                {
+                    "fingerprint": f"jira_quality_gate:{version_id}",
+                    "findingType": "risk",
+                    "severity": "high" if p0_count > p0_limit else "medium",
+                    "title": f"{version_id} 暂不满足发布质量门禁",
+                    "detail": (
+                        f"未解决 P0 {p0_count} 个、P1 {p1_count} 个；"
+                        f"缺陷重开率 {reopen_rate}%，当前未解决共 {len(active_issues)} 个。"
+                    ),
+                    "owner": "测试负责人",
+                    "recommendation": "冻结非必要变更，优先清零 P0/P1；对重开缺陷补充根因分析和回归用例，达标后重新执行发布评估。",
+                    "sourceRefs": [
+                        {"type": "connector", "id": "jira"},
+                        {"type": "version", "id": version_id},
+                    ],
+                }
+            )
         fingerprints = {item["fingerprint"] for item in findings}
         for finding in findings:
             db.execute(
@@ -2058,6 +2293,61 @@ def projects_due_for_git_sync(
             if anchor.tzinfo is None:
                 anchor = anchor.replace(tzinfo=timezone.utc)
             if (current_time - anchor.astimezone(timezone.utc)).total_seconds() >= interval * 60:
+                due.append(str(row["project_id"]))
+    return due
+
+
+def projects_due_for_jira_sync(
+    now: datetime | None = None,
+) -> list[str]:
+    """Return active projects whose live Jira connector should sync now."""
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    due: list[str] = []
+    with connection() as db:
+        rows = db.execute(
+            """SELECT cc.project_id, cc.status, cc.last_tested_at,
+                      cc.last_synced_at, ar.rule_json
+               FROM connector_configs cc
+               JOIN automation_rules ar
+                 ON ar.project_id = cc.project_id
+                AND ar.rule_key = 'quality_warning'
+                AND ar.enabled = 1
+               JOIN projects p
+                 ON p.id = cc.project_id AND p.status = 'active'
+               WHERE cc.connector = 'jira'
+                 AND cc.mode = 'live'
+                 AND cc.status IN ('connected', 'error')"""
+        ).fetchall()
+        for row in rows:
+            try:
+                config = json.loads(row["rule_json"] or "{}")
+            except json.JSONDecodeError:
+                config = {}
+            interval = max(
+                5,
+                min(24 * 60, int(config.get("syncIntervalMinutes", 30))),
+            )
+            anchor_value = (
+                row["last_tested_at"]
+                if row["status"] == "error"
+                else row["last_synced_at"]
+            )
+            if not anchor_value:
+                due.append(str(row["project_id"]))
+                continue
+            try:
+                anchor = datetime.fromisoformat(
+                    str(anchor_value).replace(" ", "T").replace("Z", "+00:00")
+                )
+            except ValueError:
+                due.append(str(row["project_id"]))
+                continue
+            if anchor.tzinfo is None:
+                anchor = anchor.replace(tzinfo=timezone.utc)
+            elapsed = (current_time - anchor.astimezone(timezone.utc)).total_seconds()
+            if elapsed >= interval * 60:
                 due.append(str(row["project_id"]))
     return due
 
@@ -2502,6 +2792,19 @@ def workspace_snapshot(project_id: str = PROJECT_ID) -> dict[str, Any]:
                           url, state, author, occurred_at, payload_json, synced_at
                    FROM external_work_evidence WHERE project_id = ?
                    ORDER BY occurred_at DESC, external_id DESC LIMIT 200""",
+                (project_id,),
+            ),
+            "externalQualityIssues": _rows(
+                db,
+                """SELECT connector, external_id, issue_key, summary, severity,
+                          status, status_category, assignee, version_id, task_id,
+                          reopen_count, due_date, created_at_external,
+                          updated_at_external, resolved_at, url, payload_json,
+                          synced_at
+                   FROM external_quality_issues WHERE project_id = ?
+                   ORDER BY CASE severity WHEN 'P0' THEN 0 WHEN 'P1' THEN 1
+                            WHEN 'P2' THEN 2 ELSE 3 END,
+                            updated_at_external DESC LIMIT 300""",
                 (project_id,),
             ),
             "connectorConfigs": _rows(
