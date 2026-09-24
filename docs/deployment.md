@@ -90,6 +90,23 @@ curl https://api.example.com/health/ready
 应使用 SQLite backup API 或在停止 API 与 Worker 后复制数据库文件，不能只复制正在
 写入的主数据库文件。
 
+每份新备份会生成 `manifest.json`，记录数据库和上传归档的 SHA-256、大小、项目数与
+业务记录数。先执行完整性校验：
+
+```bash
+npm run backup:verify -- backups/flowpilot-YYYYMMDD-HHMMSS-ffffff
+```
+
+恢复会替换当前数据库和上传目录，因此必须先停止 `npm run local` 或生产服务。确认目标
+备份校验通过后执行：
+
+```bash
+npm run restore -- backups/flowpilot-YYYYMMDD-HHMMSS-ffffff --confirm
+```
+
+恢复程序会先创建一份“恢复前安全备份”，然后验证 SQLite 完整性、拒绝包含路径穿越或
+链接项的上传归档，再替换当前数据。未传 `--confirm` 或检测到本地 API 仍运行时不会恢复。
+
 恢复演练应验证：登录、项目列表、WBS、计划基线、实际里程碑、需求文档、Git 证据、
 Jira 质量数据和巡检闭环记录均可读取。
 

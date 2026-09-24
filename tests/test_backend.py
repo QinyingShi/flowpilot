@@ -57,7 +57,7 @@ class BackendDatabaseTests(unittest.TestCase):
 
     def test_local_backup_contains_database_and_uploads(self) -> None:
         from backend.app.database import initialize_database
-        from scripts.backup import backup_workspace
+        from scripts.backup import backup_workspace, verify_backup
 
         upload_path = Path(self.temp_dir.name) / "uploads"
         upload_path.mkdir()
@@ -82,6 +82,75 @@ class BackendDatabaseTests(unittest.TestCase):
             )
         with tarfile.open(destination / "uploads.tar.gz", "r:gz") as archive:
             self.assertIn("uploads/requirement.txt", archive.getnames())
+        verification = verify_backup(destination)
+        self.assertTrue(verification["manifestPresent"])
+        self.assertEqual(verification["database"]["integrity"], "ok")
+        self.assertEqual(verification["uploads"]["files"], 1)
+
+    def test_backup_checksum_detects_tampering(self) -> None:
+        from backend.app.database import initialize_database
+        from scripts.backup import backup_workspace, verify_backup
+
+        os.environ["FLOWPILOT_BACKUP_DIR"] = str(
+            Path(self.temp_dir.name) / "backups"
+        )
+        initialize_database()
+        destination = backup_workspace()
+        assert destination is not None
+        with (destination / "flowpilot.db").open("ab") as database:
+            database.write(b"tampered")
+
+        with self.assertRaisesRegex(ValueError, "backup_file_size_mismatch"):
+            verify_backup(destination)
+
+    def test_restore_round_trip_restores_database_and_uploads(self) -> None:
+        from unittest.mock import patch
+
+        from backend.app.database import initialize_database
+        from scripts.backup import backup_workspace
+        from scripts.restore import restore_workspace
+
+        database_path = Path(os.environ["PROJECT_DB_PATH"])
+        backup_path = Path(self.temp_dir.name) / "backups"
+        upload_path = Path(self.temp_dir.name) / "uploads"
+        os.environ["FLOWPILOT_BACKUP_DIR"] = str(backup_path)
+        os.environ["PROJECT_UPLOAD_PATH"] = str(upload_path)
+        upload_path.mkdir()
+        (upload_path / "requirement.txt").write_text("original", encoding="utf-8")
+        initialize_database()
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                "UPDATE projects SET name = '备份时项目' WHERE id = 'nebula-customer-platform'"
+            )
+        destination = backup_workspace()
+        assert destination is not None
+
+        with sqlite3.connect(database_path) as database:
+            database.execute(
+                "UPDATE projects SET name = '恢复前已修改' WHERE id = 'nebula-customer-platform'"
+            )
+        (upload_path / "requirement.txt").write_text("changed", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "restore_confirmation_required"):
+            restore_workspace(destination)
+        with patch("scripts.restore.local_api_running", return_value=True):
+            with self.assertRaisesRegex(
+                RuntimeError, "restore_requires_stopped_local_service"
+            ):
+                restore_workspace(destination, confirm=True)
+        with patch("scripts.restore.local_api_running", return_value=False):
+            result = restore_workspace(destination, confirm=True)
+
+        with sqlite3.connect(database_path) as database:
+            restored_name = database.execute(
+                "SELECT name FROM projects WHERE id = 'nebula-customer-platform'"
+            ).fetchone()[0]
+        self.assertEqual(restored_name, "备份时项目")
+        self.assertEqual(
+            (upload_path / "requirement.txt").read_text(encoding="utf-8"),
+            "original",
+        )
+        self.assertTrue(Path(result["safetyBackup"]).is_dir())
 
     def test_embedded_inspection_worker_configuration(self) -> None:
         from backend.app.main import (
