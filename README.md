@@ -121,6 +121,8 @@ npm run local
 npm run dev             # 同时启动前端、API 和巡检 Worker
 npm run local           # 免费本机常驻模式，内嵌巡检并自动备份
 npm run backup          # 立即生成数据库与上传文件备份
+npm run backup:verify -- backups/flowpilot-... # 校验备份完整性
+npm run restore -- backups/flowpilot-... --confirm # 停止服务后恢复
 npm run dev:web         # 只启动前端
 npm run dev:api         # 只启动 API
 npm run dev:worker      # 只启动巡检 Worker
@@ -145,6 +147,7 @@ SQLite 部署限定为单 API 副本；需要水平扩容前应先迁移 Postgre
 
 - 默认数据库位于 `backend/data/project_command_center.db`，已被 Git 忽略。
 - 上传文件默认位于 `backend/data/uploads/`，已被 Git 忽略。
+- 每份新备份包含 `manifest.json`、SHA-256 校验和与 SQLite 完整性结果；恢复前还会自动创建一份安全备份。
 - 开启 AI 分析后，选定的文档内容可能发送给所配置的模型服务商；部署方应先完成数据分级、脱敏、授权和留存策略。
 - 本地演示身份仅用于开发，不应作为生产认证方案。
 

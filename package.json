@@ -10,6 +10,8 @@
     "dev": "python3 scripts/dev.py",
     "local": "python3 scripts/local.py",
     "backup": "python3 scripts/backup.py",
+    "backup:verify": "python3 scripts/restore.py --verify-only",
+    "restore": "python3 scripts/restore.py",
     "dev:web": "vinext dev",
     "dev:api": "backend/.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload",
     "dev:worker": "backend/.venv/bin/python -m backend.app.inspection_worker --poll-seconds 30",
