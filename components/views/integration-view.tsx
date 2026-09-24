@@ -101,6 +101,22 @@ type ExternalWorkEvidence = {
   occurred_at: string;
 };
 
+type ExternalQualityIssue = {
+  connector: 'jira';
+  external_id: string;
+  issue_key: string;
+  summary: string;
+  severity: 'P0' | 'P1' | 'P2' | 'P3';
+  status: string;
+  status_category: 'todo' | 'in_progress' | 'done';
+  assignee: string;
+  version_id?: string | null;
+  task_id?: string | null;
+  reopen_count: number;
+  updated_at_external: string;
+  url: string;
+};
+
 type WorkspacePayload = {
   user: { role: string };
   projectId: string;
@@ -113,6 +129,7 @@ type WorkspacePayload = {
     inspectionFindings?: InspectionFinding[];
     inspectionRuns?: InspectionRun[];
     externalWorkEvidence?: ExternalWorkEvidence[];
+    externalQualityIssues?: ExternalQualityIssue[];
     tasks?: string[][];
   };
 };
@@ -257,7 +274,10 @@ function readableTime(value?: string | null) {
   }).format(parsed);
 }
 
-function gitScheduleLabel(config: ConnectorConfig, rule?: AutomationRule) {
+function connectorScheduleLabel(
+  config: ConnectorConfig,
+  rule?: AutomationRule,
+) {
   if (config.mode !== 'live' || !rule?.enabled) return '自动同步：未开启';
   const ruleConfig = parseJson(rule.rule_json);
   const interval = Number(ruleConfig.syncIntervalMinutes) || 30;
@@ -266,9 +286,6 @@ function gitScheduleLabel(config: ConnectorConfig, rule?: AutomationRule) {
   );
   if (!anchor) return `自动同步：每 ${interval} 分钟 · 等待首次执行`;
   const nextSync = new Date(anchor.getTime() + interval * 60 * 1000);
-  if (nextSync.getTime() <= Date.now()) {
-    return `自动同步：每 ${interval} 分钟 · 后台即将执行`;
-  }
   return `${config.status === 'error' ? '自动重试' : '下次同步'}：${readableTime(nextSync.toISOString())}`;
 }
 
@@ -293,6 +310,8 @@ export default function IntegrationView() {
   const [resolutionNote, setResolutionNote] = useState('');
   const [linkingEvidence, setLinkingEvidence] =
     useState<ExternalWorkEvidence | null>(null);
+  const [linkingQualityIssue, setLinkingQualityIssue] =
+    useState<ExternalQualityIssue | null>(null);
   const [linkTaskId, setLinkTaskId] = useState('');
   const [ruleDrafts, setRuleDrafts] = useState<
     Record<string, Record<string, unknown>>
@@ -405,7 +424,9 @@ export default function IntegrationView() {
     setDisplayName(saved?.display_name ?? `${definition.name}连接`);
     setBaseUrl(saved?.base_url ?? definition.defaultUrl);
     setOptionValue(scalarText(options.scope));
-    setLookbackDays(Number(options.lookbackDays) || 30);
+    setLookbackDays(
+      Number(options.lookbackDays) || (definition.id === 'jira' ? 90 : 30),
+    );
     setNotice('');
   }
 
@@ -422,7 +443,7 @@ export default function IntegrationView() {
           baseUrl,
           options: {
             scope: optionValue,
-            ...(configuring === 'git' ? { lookbackDays } : {}),
+            ...(['git', 'jira'].includes(configuring) ? { lookbackDays } : {}),
           },
         },
       });
@@ -549,12 +570,66 @@ export default function IntegrationView() {
     }
   }
 
+  async function linkQualityIssueToTask() {
+    if (!linkingQualityIssue || !linkTaskId) return;
+    setBusy(`link-quality-${linkingQualityIssue.external_id}`);
+    try {
+      await mutate({
+        action: 'link_quality_issue',
+        connector: 'jira',
+        entityId: linkingQualityIssue.external_id,
+        taskId: linkTaskId,
+      });
+      setNotice(
+        `已将 ${linkingQualityIssue.issue_key} 关联到 WBS ${linkTaskId}，并重新执行版本质量巡检。`,
+      );
+      setLinkingQualityIssue(null);
+      setLinkTaskId('');
+      await loadWorkspace();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '缺陷关联失败');
+    } finally {
+      setBusy('');
+    }
+  }
+
   const activeFindings = (workspace?.snapshot.inspectionFindings ?? []).filter(
     (finding) => finding.status !== 'resolved',
   );
   const latestRun = workspace?.snapshot.inspectionRuns?.[0];
   const gitEvidence = workspace?.snapshot.externalWorkEvidence ?? [];
   const linkedGitEvidence = gitEvidence.filter((item) => item.task_id);
+  const jiraIssues = workspace?.snapshot.externalQualityIssues ?? [];
+  const qualityRuleConfig = parseJson(
+    ruleMap.get('quality_warning')?.rule_json ?? '{}',
+  );
+  const p1Limit = Number(qualityRuleConfig.p1Limit) || 3;
+  const reopenLimit = Number(qualityRuleConfig.reopenRate) || 10;
+  const versionQuality = [
+    ...new Set(jiraIssues.map((item) => item.version_id ?? '未分配版本')),
+  ]
+    .sort()
+    .map((versionId) => {
+      const issues = jiraIssues.filter(
+        (item) => (item.version_id ?? '未分配版本') === versionId,
+      );
+      const active = issues.filter((item) => item.status_category !== 'done');
+      const p0 = active.filter((item) => item.severity === 'P0').length;
+      const p1 = active.filter((item) => item.severity === 'P1').length;
+      const reopened = issues.filter((item) => item.reopen_count > 0).length;
+      const reopenRate = Math.round(
+        (reopened * 100) / Math.max(1, issues.length),
+      );
+      return {
+        versionId,
+        total: issues.length,
+        active: active.length,
+        p0,
+        p1,
+        reopenRate,
+        ready: p0 === 0 && p1 <= p1Limit && reopenRate <= reopenLimit,
+      };
+    });
 
   return (
     <>
@@ -645,9 +720,16 @@ export default function IntegrationView() {
                 <p className="mt-3 text-[10px] text-muted-foreground">
                   最近同步：{readableTime(config?.last_synced_at)}
                 </p>
-                {definition.id === 'git' && config && (
+                {['git', 'jira'].includes(definition.id) && config && (
                   <p className="mt-1 text-[10px] font-medium text-blue-700">
-                    {gitScheduleLabel(config, ruleMap.get('git_verification'))}
+                    {connectorScheduleLabel(
+                      config,
+                      ruleMap.get(
+                        definition.id === 'git'
+                          ? 'git_verification'
+                          : 'quality_warning',
+                      ),
+                    )}
                   </p>
                 )}
                 {config?.last_error && (
@@ -942,68 +1024,156 @@ export default function IntegrationView() {
             </CardTitle>
           </CardHeader>
           <CardContent className="text-xs leading-6 text-muted-foreground">
-            {gitEvidence.length === 0 ? (
+            {gitEvidence.length === 0 && jiraIssues.length === 0 ? (
               <p>
-                Git/Jira 未连接时不展示伪造指标。GitHub
-                真实同步后，会按提交信息和 PR 标题/描述中的 WBS
-                编号生成进度证据。
+                Git/Jira 未连接时不展示伪造指标。GitHub 会生成进度证据；Jira
+                会按版本生成质量门禁与发布风险。
               </p>
             ) : (
-              <div className="space-y-3">
-                <div className="grid grid-cols-3 gap-2 text-center">
-                  {[
-                    ['同步证据', gitEvidence.length],
-                    ['已关联任务', linkedGitEvidence.length],
-                    [
-                      '待人工关联',
-                      gitEvidence.length - linkedGitEvidence.length,
-                    ],
-                  ].map(([label, value]) => (
-                    <div key={label} className="rounded-lg bg-muted/60 p-2">
-                      <p className="text-base font-semibold text-foreground">
-                        {value}
+              <div className="space-y-5">
+                {jiraIssues.length > 0 && (
+                  <section className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="font-semibold text-foreground">
+                        Jira 版本质量门禁
                       </p>
-                      <p className="text-[10px]">{label}</p>
+                      <Badge variant="secondary">
+                        {jiraIssues.length} 个缺陷
+                      </Badge>
                     </div>
-                  ))}
-                </div>
-                {gitEvidence.slice(0, 8).map((item) => (
-                  <div
-                    key={`${item.external_id}-${item.task_id ?? 'unlinked'}`}
-                    className="flex items-start gap-2 rounded-lg border p-2"
-                  >
-                    <a
-                      href={item.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="min-w-0 flex-1 transition-colors hover:text-foreground"
-                    >
-                      <span className="font-medium text-foreground">
-                        {item.task_id ? `${item.task_id} · ` : ''}
-                        {item.title}
-                      </span>
-                      <span className="mt-1 block text-[10px]">
-                        {item.evidence_type === 'pull_request' ? 'PR' : '提交'}{' '}
-                        · {item.state} · {item.author || '未知作者'} ·{' '}
-                        {readableTime(item.occurred_at)}
-                      </span>
-                    </a>
-                    {!item.task_id && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="shrink-0"
-                        onClick={() => {
-                          setLinkingEvidence(item);
-                          setLinkTaskId('');
-                        }}
-                        disabled={!canManage || Boolean(busy)}
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      {versionQuality.map((quality) => (
+                        <div
+                          key={quality.versionId}
+                          className="rounded-lg border bg-muted/30 p-3"
+                        >
+                          <div className="flex items-center justify-between">
+                            <strong className="text-foreground">
+                              {quality.versionId}
+                            </strong>
+                            <Badge
+                              className={
+                                quality.ready
+                                  ? 'bg-emerald-100 text-emerald-700'
+                                  : 'bg-rose-100 text-rose-700'
+                              }
+                            >
+                              {quality.ready ? '可发布' : '暂缓发布'}
+                            </Badge>
+                          </div>
+                          <p className="mt-2 text-[10px]">
+                            未解决 {quality.active} · P0 {quality.p0} · P1{' '}
+                            {quality.p1} · 重开率 {quality.reopenRate}%
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                    {jiraIssues.slice(0, 6).map((issue) => (
+                      <div
+                        key={issue.external_id}
+                        className="flex items-start gap-2 rounded-lg border p-2"
                       >
-                        关联 WBS
-                      </Button>
-                    )}
-                  </div>
-                ))}
+                        <a
+                          href={issue.url || undefined}
+                          target={issue.url ? '_blank' : undefined}
+                          rel={issue.url ? 'noreferrer' : undefined}
+                          className="min-w-0 flex-1"
+                        >
+                          <span className="font-medium text-foreground">
+                            {issue.issue_key} · {issue.summary}
+                          </span>
+                          <span className="mt-1 block text-[10px]">
+                            {issue.severity} · {issue.status} ·{' '}
+                            {issue.version_id ?? '未分配版本'} ·{' '}
+                            {issue.task_id
+                              ? `WBS ${issue.task_id}`
+                              : '未关联 WBS'}
+                            {issue.reopen_count > 0
+                              ? ` · 重开 ${issue.reopen_count} 次`
+                              : ''}
+                          </span>
+                        </a>
+                        {!issue.task_id && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="shrink-0"
+                            onClick={() => {
+                              setLinkingQualityIssue(issue);
+                              setLinkTaskId('');
+                            }}
+                            disabled={!canManage || Boolean(busy)}
+                          >
+                            关联 WBS
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </section>
+                )}
+                {gitEvidence.length > 0 && (
+                  <section className="space-y-3 border-t pt-4">
+                    <p className="font-semibold text-foreground">
+                      Git 进度证据
+                    </p>
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      {[
+                        ['同步证据', gitEvidence.length],
+                        ['已关联任务', linkedGitEvidence.length],
+                        [
+                          '待人工关联',
+                          gitEvidence.length - linkedGitEvidence.length,
+                        ],
+                      ].map(([label, value]) => (
+                        <div key={label} className="rounded-lg bg-muted/60 p-2">
+                          <p className="text-base font-semibold text-foreground">
+                            {value}
+                          </p>
+                          <p className="text-[10px]">{label}</p>
+                        </div>
+                      ))}
+                    </div>
+                    {gitEvidence.slice(0, 6).map((item) => (
+                      <div
+                        key={`${item.external_id}-${item.task_id ?? 'unlinked'}`}
+                        className="flex items-start gap-2 rounded-lg border p-2"
+                      >
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="min-w-0 flex-1 transition-colors hover:text-foreground"
+                        >
+                          <span className="font-medium text-foreground">
+                            {item.task_id ? `${item.task_id} · ` : ''}
+                            {item.title}
+                          </span>
+                          <span className="mt-1 block text-[10px]">
+                            {item.evidence_type === 'pull_request'
+                              ? 'PR'
+                              : '提交'}{' '}
+                            · {item.state} · {item.author || '未知作者'} ·{' '}
+                            {readableTime(item.occurred_at)}
+                          </span>
+                        </a>
+                        {!item.task_id && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="shrink-0"
+                            onClick={() => {
+                              setLinkingEvidence(item);
+                              setLinkTaskId('');
+                            }}
+                            disabled={!canManage || Boolean(busy)}
+                          >
+                            关联 WBS
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </section>
+                )}
               </div>
             )}
           </CardContent>
@@ -1062,6 +1232,70 @@ export default function IntegrationView() {
               disabled={!linkTaskId || busy.startsWith('link-')}
             >
               {busy.startsWith('link-') ? '关联并巡检中…' : '确认关联并巡检'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(linkingQualityIssue)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setLinkingQualityIssue(null);
+            setLinkTaskId('');
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>关联 Jira 缺陷到 WBS</DialogTitle>
+            <DialogDescription>
+              关联后会立即重算任务风险和版本质量门禁，后续 Jira
+              同步会保留该关联。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="rounded-lg bg-muted/60 p-3 text-xs leading-5">
+              <strong>
+                {linkingQualityIssue?.issue_key} ·{' '}
+                {linkingQualityIssue?.summary}
+              </strong>
+              <p className="mt-1 text-muted-foreground">
+                {linkingQualityIssue?.severity} · {linkingQualityIssue?.status}{' '}
+                · {linkingQualityIssue?.assignee || '未分配负责人'}
+              </p>
+            </div>
+            <label className="block text-xs font-medium">
+              选择 WBS 任务
+              <NativeSelect
+                className="mt-1 w-full"
+                value={linkTaskId}
+                onChange={(event) => setLinkTaskId(event.target.value)}
+                aria-label="选择 Jira 缺陷要关联的 WBS 任务"
+              >
+                <NativeSelectOption value="">请选择任务</NativeSelectOption>
+                {(workspace?.snapshot.tasks ?? []).map((task) => (
+                  <NativeSelectOption key={task[0]} value={task[0]}>
+                    {task[0]} · {task[1]}（{task[3]}）
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setLinkingQualityIssue(null)}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={() => void linkQualityIssueToTask()}
+              disabled={!linkTaskId || busy.startsWith('link-quality-')}
+            >
+              {busy.startsWith('link-quality-')
+                ? '关联并巡检中…'
+                : '确认关联并巡检'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1144,7 +1378,7 @@ export default function IntegrationView() {
                 }
               />
             </label>
-            {configuring === 'git' && (
+            {(configuring === 'git' || configuring === 'jira') && (
               <label
                 className="block text-xs font-medium"
                 htmlFor="connector-lookback-days"
@@ -1155,13 +1389,16 @@ export default function IntegrationView() {
                   className="mt-1"
                   type="number"
                   min={1}
-                  max={90}
+                  max={configuring === 'jira' ? 365 : 90}
                   value={lookbackDays}
                   onChange={(event) =>
                     setLookbackDays(
                       Math.max(
                         1,
-                        Math.min(90, Number(event.target.value) || 1),
+                        Math.min(
+                          configuring === 'jira' ? 365 : 90,
+                          Number(event.target.value) || 1,
+                        ),
                       ),
                     )
                   }
@@ -1179,7 +1416,9 @@ export default function IntegrationView() {
                 ? '沙箱只生成明确标记的本地连接测试和同步演练日志，不会访问或修改真实第三方数据。'
                 : configuring === 'git'
                   ? '公开 GitHub 仓库可免 Token 免费读取；私有仓库或更高调用额度请在服务端配置只读 GIT_ACCESS_TOKEN。页面不会收集或保存 Token。'
-                  : '真实凭证请通过服务端环境变量配置；页面不会收集 App Secret、Token 或密码。当前适配器未启用时测试会明确失败。'}
+                  : configuring === 'jira'
+                    ? 'Jira Cloud 使用服务端 JIRA_EMAIL 和 JIRA_API_TOKEN；页面只保存站点根地址和项目代码，不保存凭证。'
+                    : '真实凭证请通过服务端环境变量配置；页面不会收集 App Secret、Token 或密码。当前适配器未启用时测试会明确失败。'}
             </div>
           </div>
           <DialogFooter>

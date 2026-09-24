@@ -42,7 +42,9 @@ class BackendDatabaseTests(unittest.TestCase):
             "GITHUB_ALLOWED_HOSTS",
             "GITHUB_API_VERSION",
             "JIRA_BASE_URL",
+            "JIRA_EMAIL",
             "JIRA_API_TOKEN",
+            "JIRA_ALLOWED_HOSTS",
             "PROJECT_AI_REQUIREMENTS_ENABLED",
             "OPENAI_API_KEY",
             "PROJECT_AI_MODEL",
@@ -1690,6 +1692,204 @@ class BackendDatabaseTests(unittest.TestCase):
         self.assertEqual(merged["parserMode"], "openai-structured-output")
         self.assertEqual(merged["tasks"][1]["owner"], "陈默")
         self.assertEqual(merged["tasks"][1]["dependencySequences"], [1])
+
+    def test_jira_connector_normalizes_quality_and_wbs_references(self) -> None:
+        from unittest.mock import patch
+
+        from backend.app.jira_connector import (
+            sync_jira_quality,
+            test_jira_connection as verify_jira_connection,
+        )
+
+        project_payload = {"key": "NEBULA", "name": "Nebula Platform"}
+        search_payload = {
+            "issues": [
+                {
+                    "key": "NEBULA-231",
+                    "fields": {
+                        "summary": "2.2 支付回调重复触发",
+                        "description": {
+                            "type": "doc",
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [{"type": "text", "text": "关联 WBS 2.2"}],
+                                }
+                            ],
+                        },
+                        "status": {
+                            "name": "重新打开",
+                            "statusCategory": {"key": "indeterminate"},
+                        },
+                        "priority": {"name": "Highest"},
+                        "labels": [],
+                        "assignee": {"displayName": "赵一"},
+                        "fixVersions": [{"name": "v1.0 Beta"}],
+                        "created": "2026-09-20T08:00:00Z",
+                        "updated": "2026-09-23T08:00:00Z",
+                        "resolutiondate": None,
+                        "duedate": "2026-09-25",
+                    },
+                    "changelog": {
+                        "histories": [
+                            {
+                                "items": [
+                                    {
+                                        "field": "status",
+                                        "fromString": "Done",
+                                        "toString": "Reopened",
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+        with patch(
+            "backend.app.jira_connector._request_json",
+            side_effect=[project_payload, search_payload],
+        ):
+            connection = verify_jira_connection(
+                base_url="https://acme.atlassian.net",
+                project_key="nebula",
+                email="admin@example.com",
+                token="secret",
+            )
+            result = sync_jira_quality(
+                base_url="https://acme.atlassian.net",
+                project_key="nebula",
+                email="admin@example.com",
+                token="secret",
+                task_ids=["2.2", "2"],
+                version_ids=["v0.9", "v1.0"],
+                lookback_days=90,
+            )
+
+        self.assertEqual(connection["key"], "NEBULA")
+        self.assertEqual(result["open"], 1)
+        self.assertEqual(result["p0"], 1)
+        issue = result["issues"][0]
+        self.assertEqual(issue["taskId"], "2.2")
+        self.assertEqual(issue["versionId"], "v1.0")
+        self.assertEqual(issue["reopenCount"], 1)
+
+    def test_jira_quality_issues_create_gate_and_keep_manual_link(self) -> None:
+        from backend.app.database import (
+            PROJECT_ID,
+            initialize_database,
+            link_external_quality_issue,
+            replace_connector_quality_issues,
+            run_project_inspection,
+            workspace_snapshot,
+        )
+        from backend.app.jira_connector import demo_jira_quality_issues
+
+        initialize_database()
+        issues = demo_jira_quality_issues()
+        self.assertEqual(
+            replace_connector_quality_issues(
+                project_id=PROJECT_ID,
+                connector="jira",
+                issues=issues,
+            ),
+            8,
+        )
+        link_external_quality_issue(
+            project_id=PROJECT_ID,
+            external_id="issue:NEBULA-191",
+            task_id="1.1",
+        )
+        replace_connector_quality_issues(
+            project_id=PROJECT_ID,
+            connector="jira",
+            issues=issues,
+        )
+        result = run_project_inspection(
+            project_id=PROJECT_ID,
+            trigger_type="manual",
+            actor_id="tester",
+        )
+        snapshot = workspace_snapshot()
+
+        self.assertTrue(
+            any(
+                item["fingerprint"] == "jira_quality_gate:v1.0"
+                for item in result["findings"]
+            )
+        )
+        linked = next(
+            item
+            for item in snapshot["externalQualityIssues"]
+            if item["issue_key"] == "NEBULA-191"
+        )
+        self.assertEqual(linked["task_id"], "1.1")
+
+    def test_jira_auto_sync_schedule_respects_interval_and_rule(self) -> None:
+        from datetime import datetime, timezone
+
+        from backend.app.database import (
+            PROJECT_ID,
+            initialize_database,
+            projects_due_for_jira_sync,
+            set_connector_status,
+            upsert_automation_rule,
+            upsert_connector_config,
+        )
+
+        initialize_database()
+        upsert_connector_config(
+            project_id=PROJECT_ID,
+            connector="jira",
+            mode="live",
+            display_name="Jira Cloud",
+            base_url="https://acme.atlassian.net",
+            config={"scope": "NEBULA", "lookbackDays": 90},
+            actor_id="tester",
+        )
+        set_connector_status(
+            project_id=PROJECT_ID,
+            connector="jira",
+            status="connected",
+        )
+        self.assertIn(PROJECT_ID, projects_due_for_jira_sync())
+
+        set_connector_status(
+            project_id=PROJECT_ID,
+            connector="jira",
+            status="connected",
+            synced=True,
+        )
+        self.assertNotIn(PROJECT_ID, projects_due_for_jira_sync())
+
+        with sqlite3.connect(os.environ["PROJECT_DB_PATH"]) as database:
+            database.execute(
+                """UPDATE connector_configs
+                   SET last_synced_at = '2026-09-23 00:00:00'
+                   WHERE project_id = ? AND connector = 'jira'""",
+                (PROJECT_ID,),
+            )
+        self.assertIn(
+            PROJECT_ID,
+            projects_due_for_jira_sync(
+                datetime(2026, 9, 23, 0, 31, tzinfo=timezone.utc)
+            ),
+        )
+
+        upsert_automation_rule(
+            project_id=PROJECT_ID,
+            rule_key="quality_warning",
+            enabled=False,
+            channel="workspace",
+            config={"p0Limit": 0, "p1Limit": 3, "reopenRate": 10},
+            actor_id="tester",
+        )
+        self.assertNotIn(
+            PROJECT_ID,
+            projects_due_for_jira_sync(
+                datetime(2026, 9, 23, 1, 0, tzinfo=timezone.utc)
+            ),
+        )
 
     def test_github_connector_matches_wbs_references(self) -> None:
         from datetime import datetime, timezone

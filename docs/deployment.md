@@ -12,9 +12,9 @@ FlowPilot 当前生产拓扑由两个部分组成：
 ## 零费用方案：本机运行
 
 当前无需公网服务时，推荐直接运行 `npm run local`。它使用本地数据库、内嵌巡检与
-Git 定时同步调度器，并在启动时及每 24 小时调用 SQLite backup API，把数据库和上传
-文件保存到 `backups/`。同步间隔在“Git 进度核验”规则中配置；失败会记录告警并在下个
-周期重试。也可随时运行 `npm run backup` 手动备份。
+Git/Jira 定时同步调度器，并在启动时及每 24 小时调用 SQLite backup API，把数据库和
+上传文件保存到 `backups/`。同步间隔分别由“Git 进度核验”和“版本质量预警”规则控制；
+失败会记录告警并在下个周期重试。也可随时运行 `npm run backup` 手动备份。
 
 在 `.env.local` 设置 `FLOWPILOT_LAN_ACCESS=true` 后，同一可信局域网中的设备可通过
 Mac 的局域网 IP 和 3001 端口访问。主机必须保持开机，macOS 防火墙也需要允许 Node
@@ -31,9 +31,9 @@ API 进程，而不是创建第二个 Worker 服务。该模式仍限定单实�
 - `PROJECT_BOOTSTRAP_ADMIN_EMAIL`：首位系统管理员的真实邮箱。
 - `PROJECT_CORS_ORIGINS`：最终 Sites 站点的 HTTPS Origin。
 
-GitHub 公共仓库可免 Token 读取。私有仓库连接和 AI 文档分析默认关闭；需要时再在
-服务 Environment 中增加 `GIT_ACCESS_TOKEN` 或 `OPENAI_API_KEY`，避免首次部署被
-非必填凭证阻塞。
+GitHub 公共仓库可免 Token 读取。私有仓库连接、Jira Cloud 和 AI 文档分析默认关闭；
+需要时再在服务 Environment 中增加 `GIT_ACCESS_TOKEN`、`JIRA_EMAIL`、
+`JIRA_API_TOKEN` 或 `OPENAI_API_KEY`，避免首次部署被非必填凭证阻塞。
 
 `PROJECT_API_PROXY_SECRET` 由 Render 自动生成。首次创建后从 Render 环境变量中复制
 该值，作为 Sites 的同名 Secret。部署完成后访问 `/health/ready`，确认返回
@@ -107,8 +107,8 @@ npm run restore -- backups/flowpilot-YYYYMMDD-HHMMSS-ffffff --confirm
 恢复程序会先创建一份“恢复前安全备份”，然后验证 SQLite 完整性、拒绝包含路径穿越或
 链接项的上传归档，再替换当前数据。未传 `--confirm` 或检测到本地 API 仍运行时不会恢复。
 
-恢复演练应验证：登录、项目列表、WBS、计划基线、实际里程碑、需求文档、Git 证据和
-巡检闭环记录均可读取。
+恢复演练应验证：登录、项目列表、WBS、计划基线、实际里程碑、需求文档、Git 证据、
+Jira 质量数据和巡检闭环记录均可读取。
 
 Render 会为持久盘创建每日快照，但仍建议定期导出应用级备份，并至少完成一次恢复
 演练。挂载持久盘会使部署期间存在短暂中断，这是当前 SQLite 单实例方案的已知限制。

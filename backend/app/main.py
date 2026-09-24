@@ -28,10 +28,12 @@ from .database import (
     initialize_database,
     list_projects,
     list_workspace_members,
+    link_external_quality_issue,
     link_external_work_evidence,
     member_has_permission,
     member_has_project_access,
     record_milestone_actual,
+    replace_connector_quality_issues,
     save_plan_baseline,
     set_connector_status,
     upsert_project_record,
@@ -47,10 +49,18 @@ from .database import (
     upsert_tasks_with_hierarchy,
     workspace_snapshot,
 )
-from .connector_sync import sync_project_github_evidence
+from .connector_sync import (
+    sync_project_github_evidence,
+    sync_project_jira_quality,
+)
 from .github_connector import (
     GitHubConnectorError,
     test_github_connection,
+)
+from .jira_connector import (
+    JiraConnectorError,
+    demo_jira_quality_issues,
+    test_jira_connection,
 )
 from .inspection_worker import run_due_projects
 from .task_model import valid_task_hierarchy, valid_task_record
@@ -651,7 +661,7 @@ def mutate_workspace(
                 "dingtalk": ("DINGTALK_APP_KEY", "DINGTALK_APP_SECRET"),
                 "sheet": ("SHEET_CONNECTOR_TOKEN",),
                 "git": (),
-                "jira": ("JIRA_BASE_URL", "JIRA_API_TOKEN"),
+                "jira": ("JIRA_EMAIL", "JIRA_API_TOKEN"),
             }
             missing = [
                 name
@@ -721,6 +731,64 @@ def mutate_workspace(
                     "detail": detail,
                     "repository": repository,
                 }
+            if connector == "jira" and not missing:
+                options = json.loads(config["config_json"] or "{}")
+                try:
+                    jira_project = test_jira_connection(
+                        base_url=str(config["base_url"]),
+                        project_key=str(options.get("scope", "")),
+                        email=os.getenv("JIRA_EMAIL", ""),
+                        token=os.getenv("JIRA_API_TOKEN", ""),
+                    )
+                except JiraConnectorError as error:
+                    detail = str(error)
+                    set_connector_status(
+                        project_id=project_id,
+                        connector=connector,
+                        status="error",
+                        error=detail,
+                    )
+                    append_sync_event(
+                        project_id=project_id,
+                        connector=connector,
+                        direction="inbound",
+                        entity_type="connection_test",
+                        status="failed",
+                        detail=detail,
+                    )
+                    raise HTTPException(status_code=502, detail=detail) from error
+                detail = (
+                    f"Jira 项目 {jira_project['key']} · {jira_project['name']} 连接成功"
+                )
+                set_connector_status(
+                    project_id=project_id,
+                    connector=connector,
+                    status="connected",
+                )
+                append_sync_event(
+                    project_id=project_id,
+                    connector=connector,
+                    direction="inbound",
+                    entity_type="connection_test",
+                    status="success",
+                    detail=detail,
+                )
+                append_project_audit_log(
+                    actor_id=user["id"],
+                    actor_type="connector",
+                    action=body.action,
+                    entity_type="connector",
+                    entity_id=connector,
+                    detail=detail,
+                )
+                return {
+                    "ok": True,
+                    "connector": connector,
+                    "status": "connected",
+                    "mode": "live",
+                    "detail": detail,
+                    "project": jira_project,
+                }
             detail = (
                 f"服务端缺少凭证：{', '.join(missing)}"
                 if missing
@@ -774,14 +842,80 @@ def mutate_workspace(
                     detail=result["detail"],
                 )
                 return {"ok": True, **result}
+            if config["mode"] == "live" and connector == "jira":
+                try:
+                    result = sync_project_jira_quality(
+                        project_id=project_id,
+                        trigger_type="manual",
+                        actor_id="jira-connector",
+                    )
+                except (JiraConnectorError, ValueError) as error:
+                    detail = str(error)
+                    raise HTTPException(status_code=502, detail=detail) from error
+                append_project_audit_log(
+                    actor_id=user["id"],
+                    actor_type="connector",
+                    action=body.action,
+                    entity_type="quality_issue",
+                    entity_id=connector,
+                    detail=result["detail"],
+                )
+                return {"ok": True, **result}
             if config["mode"] != "sandbox":
                 raise HTTPException(status_code=409, detail="live_sync_not_available")
+            if connector == "jira":
+                issues = demo_jira_quality_issues()
+                count = replace_connector_quality_issues(
+                    project_id=project_id,
+                    connector="jira",
+                    issues=issues,
+                )
+                set_connector_status(
+                    project_id=project_id,
+                    connector=connector,
+                    status="connected",
+                    synced=True,
+                )
+                inspection = run_project_inspection(
+                    project_id=project_id,
+                    trigger_type="manual",
+                    actor_id="jira-sandbox",
+                )
+                detail = (
+                    f"Jira 沙箱同步完成：写入 {count} 个演示缺陷，"
+                    "已按版本生成质量门禁与风险告警"
+                )
+                append_sync_event(
+                    project_id=project_id,
+                    connector=connector,
+                    direction="inbound",
+                    entity_type="quality_issue",
+                    status="success",
+                    detail=detail,
+                )
+                append_project_audit_log(
+                    actor_id=user["id"],
+                    actor_type="connector",
+                    action=body.action,
+                    entity_type="quality_issue",
+                    entity_id=connector,
+                    detail=detail,
+                )
+                return {
+                    "ok": True,
+                    "connector": connector,
+                    "count": count,
+                    "detail": detail,
+                    "inspection": {
+                        "id": inspection["id"],
+                        "total": inspection["total"],
+                    },
+                }
             demo_counts = {
                 "feishu": 8,
                 "dingtalk": 8,
                 "sheet": 24,
                 "git": 12,
-                "jira": 23,
             }
             count = demo_counts.get(connector, 0)
             detail = f"沙箱同步演练完成：校验 {count} 条样例记录，未写入真实业务数据"
@@ -838,6 +972,40 @@ def mutate_workspace(
             return {
                 "ok": True,
                 "connector": connector,
+                "externalId": external_id,
+                "taskId": task_id,
+                "inspection": {
+                    "id": inspection["id"],
+                    "total": inspection["total"],
+                },
+            }
+
+        if body.action == "link_quality_issue":
+            external_id = body.entityId or ""
+            task_id = body.taskId or ""
+            try:
+                link_external_quality_issue(
+                    project_id=project_id,
+                    external_id=external_id,
+                    task_id=task_id,
+                )
+                inspection = run_project_inspection(
+                    project_id=project_id,
+                    trigger_type="manual",
+                    actor_id=user["id"],
+                )
+            except ValueError as error:
+                raise HTTPException(status_code=400, detail=str(error)) from error
+            append_project_audit_log(
+                actor_id=user["id"],
+                actor_type="user",
+                action=body.action,
+                entity_type="quality_issue",
+                entity_id=external_id,
+                detail=f"task={task_id}",
+            )
+            return {
+                "ok": True,
                 "externalId": external_id,
                 "taskId": task_id,
                 "inspection": {

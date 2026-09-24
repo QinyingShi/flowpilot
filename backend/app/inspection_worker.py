@@ -8,14 +8,36 @@ from .database import (
     initialize_database,
     projects_due_for_git_sync,
     projects_due_for_inspection,
+    projects_due_for_jira_sync,
     run_project_inspection,
 )
-from .connector_sync import sync_project_github_evidence
+from .connector_sync import (
+    sync_project_github_evidence,
+    sync_project_jira_quality,
+)
 from .runtime import validate_runtime_configuration
 
 
 def run_due_projects() -> int:
     completed = 0
+    for project_id in projects_due_for_jira_sync():
+        try:
+            result = sync_project_jira_quality(
+                project_id=project_id,
+                trigger_type="scheduled",
+                actor_id="jira-sync-worker",
+                allow_error_retry=True,
+            )
+            completed += 1
+            print(
+                f"jira sync completed project={project_id} records={result['count']}",
+                flush=True,
+            )
+        except Exception as error:  # one connector must not stop other projects
+            print(
+                f"jira sync failed project={project_id} error={error}",
+                flush=True,
+            )
     for project_id in projects_due_for_git_sync():
         try:
             result = sync_project_github_evidence(
