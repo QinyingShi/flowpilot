@@ -6,6 +6,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -2041,6 +2042,8 @@ export default function Home() {
   const [running, setRunning] = useState(false);
   const [toast, setToast] = useState('');
   const [notificationOpen, setNotificationOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const [readNotifications, setReadNotifications] = useState<string[]>([]);
   const [workspaceSourceState, setWorkspaceSourceState] =
     useState<WorkspaceSourceState>('loading');
@@ -2154,6 +2157,85 @@ export default function Home() {
   const unreadNotificationCount = headerNotifications.filter(
     (item) => !readNotifications.includes(item.id),
   ).length;
+
+  const globalSearchResults = useMemo(() => {
+    const query = searchQuery.trim().toLocaleLowerCase('zh-CN');
+    if (!query) return [];
+    return [
+      ...nav.map((item) => ({
+        key: `view-${item.label}`,
+        title: item.label,
+        detail: '功能页面',
+        kind: 'view' as const,
+        view: item.label,
+      })),
+      ...workspaceTasks.map((task) => ({
+        key: `task-${task[0]}`,
+        title: `${task[0]} ${task[1]}`,
+        detail: `${task[3]} · ${task[4]} · ${task[5]}`,
+        kind: 'task' as const,
+        task,
+      })),
+      ...milestones.map((milestone, index) => ({
+        key: `milestone-${milestone.version}-${milestone.name}-${index}`,
+        title: milestone.name,
+        detail: `${versionScopeLabels[milestone.version as VersionId]} · ${milestone.date} · ${milestone.owner}`,
+        kind: 'milestone' as const,
+        milestone,
+      })),
+      ...workspaceResources.map((resource, index) => ({
+        key: `resource-${resource.name}-${index}`,
+        title: resource.name,
+        detail: `${resource.role} · 当前负载 ${resource.load}%`,
+        kind: 'resource' as const,
+        resource,
+      })),
+    ]
+      .filter((item) =>
+        `${item.title} ${item.detail}`
+          .toLocaleLowerCase('zh-CN')
+          .includes(query),
+      )
+      .slice(0, 12);
+  }, [searchQuery, workspaceResources, workspaceTasks]);
+
+  useEffect(() => {
+    function openGlobalSearch(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+    }
+    window.addEventListener('keydown', openGlobalSearch);
+    return () => window.removeEventListener('keydown', openGlobalSearch);
+  }, []);
+
+  function selectGlobalSearchResult(
+    result: (typeof globalSearchResults)[number],
+  ) {
+    setSearchOpen(false);
+    setSearchQuery('');
+    if (result.kind === 'view') {
+      setView(result.view);
+      return;
+    }
+    if (result.kind === 'task') {
+      setVersionScope(result.task[3]);
+      setWbsOwnerFocus(result.task[4]);
+      setWbsStatusFocus('全部');
+      setWbsChangeFocus('');
+      setView('WBS与任务');
+      return;
+    }
+    if (result.kind === 'milestone') {
+      setVersionScope(result.milestone.version as VersionId);
+      setMilestoneFocus(result.milestone.name);
+      setView('计划与里程碑');
+      return;
+    }
+    setVersionScope('portfolio');
+    setView('资源与负载');
+  }
 
   useEffect(() => {
     fetch('/api/auth/session', { cache: 'no-store' })
@@ -2726,13 +2808,18 @@ export default function Home() {
             </span>
           </button>
         </div>
-        <div className="hidden w-[360px] items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm text-muted-foreground md:flex">
+        <button
+          type="button"
+          aria-label="全局搜索"
+          onClick={() => setSearchOpen(true)}
+          className="hidden w-[360px] items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-left text-sm text-muted-foreground transition hover:border-primary/40 hover:bg-muted md:flex"
+        >
           <Search className="size-4" />
           搜索任务、里程碑或负责人…{' '}
           <span className="ml-auto rounded border bg-background px-1.5 text-xs">
             ⌘K
           </span>
-        </div>
+        </button>
         <div className="flex items-center gap-2">
           <WorkspaceConnectionBadge state={workspaceSourceState} />
           <Popover open={notificationOpen} onOpenChange={setNotificationOpen}>
@@ -3197,6 +3284,59 @@ export default function Home() {
           </div>
         </section>
       </div>
+
+      <Dialog
+        open={searchOpen}
+        onOpenChange={(open) => {
+          setSearchOpen(open);
+          if (!open) setSearchQuery('');
+        }}
+      >
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>全局搜索</DialogTitle>
+            <DialogDescription>
+              搜索任务编号或名称、里程碑、负责人和功能页面。
+            </DialogDescription>
+          </DialogHeader>
+          <Input
+            aria-label="搜索关键词"
+            placeholder="例如：2.2、支付、陈默、提测"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+          />
+          <div className="max-h-80 space-y-2 overflow-y-auto">
+            {!searchQuery.trim() ? (
+              <p className="rounded-lg border border-dashed p-5 text-center text-sm text-muted-foreground">
+                输入关键词开始搜索
+              </p>
+            ) : globalSearchResults.length === 0 ? (
+              <p className="rounded-lg border border-dashed p-5 text-center text-sm text-muted-foreground">
+                没有找到匹配结果
+              </p>
+            ) : (
+              globalSearchResults.map((result) => (
+                <button
+                  key={result.key}
+                  type="button"
+                  onClick={() => selectGlobalSearchResult(result)}
+                  className="flex w-full items-center gap-3 rounded-lg border p-3 text-left transition hover:border-primary/40 hover:bg-primary/[0.03]"
+                >
+                  <Search className="size-4 shrink-0 text-primary" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">
+                      {result.title}
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {result.detail}
+                    </span>
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={dialog === 'inspection'}

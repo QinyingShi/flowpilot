@@ -312,6 +312,7 @@ export default function IntegrationView() {
     useState<ExternalWorkEvidence | null>(null);
   const [linkingQualityIssue, setLinkingQualityIssue] =
     useState<ExternalQualityIssue | null>(null);
+  const [showAllJiraIssues, setShowAllJiraIssues] = useState(false);
   const [linkTaskId, setLinkTaskId] = useState('');
   const [ruleDrafts, setRuleDrafts] = useState<
     Record<string, Record<string, unknown>>
@@ -600,6 +601,23 @@ export default function IntegrationView() {
   const gitEvidence = workspace?.snapshot.externalWorkEvidence ?? [];
   const linkedGitEvidence = gitEvidence.filter((item) => item.task_id);
   const jiraIssues = workspace?.snapshot.externalQualityIssues ?? [];
+  const orderedJiraIssues = [...jiraIssues].sort((left, right) => {
+    const linkPriority =
+      Number(Boolean(left.task_id)) - Number(Boolean(right.task_id));
+    if (linkPriority !== 0) return linkPriority;
+    const statusPriority =
+      Number(left.status_category === 'done') -
+      Number(right.status_category === 'done');
+    if (statusPriority !== 0) return statusPriority;
+    const severityOrder = { P0: 0, P1: 1, P2: 2, P3: 3 };
+    const severityPriority =
+      severityOrder[left.severity] - severityOrder[right.severity];
+    if (severityPriority !== 0) return severityPriority;
+    return left.issue_key.localeCompare(right.issue_key);
+  });
+  const visibleJiraIssues = showAllJiraIssues
+    ? orderedJiraIssues
+    : orderedJiraIssues.slice(0, 6);
   const qualityRuleConfig = parseJson(
     ruleMap.get('quality_warning')?.rule_json ?? '{}',
   );
@@ -1068,7 +1086,7 @@ export default function IntegrationView() {
                         </div>
                       ))}
                     </div>
-                    {jiraIssues.slice(0, 6).map((issue) => (
+                    {visibleJiraIssues.map((issue) => (
                       <div
                         key={issue.external_id}
                         className="flex items-start gap-2 rounded-lg border p-2"
@@ -1109,6 +1127,20 @@ export default function IntegrationView() {
                         )}
                       </div>
                     ))}
+                    {jiraIssues.length > 6 && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="w-full"
+                        onClick={() =>
+                          setShowAllJiraIssues((current) => !current)
+                        }
+                      >
+                        {showAllJiraIssues
+                          ? '收起缺陷列表'
+                          : `查看全部 ${jiraIssues.length} 个缺陷`}
+                      </Button>
+                    )}
                   </section>
                 )}
                 {gitEvidence.length > 0 && (
