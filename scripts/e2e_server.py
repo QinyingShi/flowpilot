@@ -57,6 +57,11 @@ def main() -> int:
                 ROOT / name,
                 target_is_directory=(ROOT / name).is_dir(),
             )
+        (frontend_root / ".env.local").write_text(
+            "PROJECT_API_BASE_URL=http://127.0.0.1:8011\n"
+            "NEXT_PUBLIC_SITE_URL=http://127.0.0.1:3011\n",
+            encoding="utf-8",
+        )
         environment = os.environ.copy()
         environment.update(
             {
