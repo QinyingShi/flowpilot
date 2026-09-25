@@ -48,3 +48,41 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install application dependencies
+        run: |
+          npm ci
+          python -m pip install -r backend/requirements.txt
+
+      - name: Install browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser acceptance tests
+        run: npm run test:e2e
+
+      - name: Upload browser test evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-evidence
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
