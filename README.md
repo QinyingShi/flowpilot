@@ -137,10 +137,18 @@ npm run dev:api         # 只启动 API
 npm run dev:worker      # 只启动巡检 Worker
 npm run inspection:once # 执行一次巡检
 npm run test:api        # 后端测试
+npm run test:e2e        # 隔离数据运行浏览器端到端验收
+npm run test:e2e:headed # 可视化运行端到端验收
 npm run lint            # 前端静态检查
 npx tsc --noEmit        # TypeScript 类型检查
 npm run build           # 生产构建
 ```
+
+端到端验收会自动启动独立的前端 `3011`、API `8011` 和临时 SQLite，结束后清理测试数据，
+不会影响日常运行的 `3001/8000` 或占用 `8080`。测试覆盖工作台加载、通知与全局搜索、
+WBS 阻塞和看板、计划与实际节点、会议、报告、成员权限、Jira 沙箱同步和窄屏导航。
+GitHub Pull Request 会并行执行常规校验与浏览器验收；失败时保留 7 天的截图、录像、
+追踪文件和 HTML 报告供定位。
 
 ## 生产部署
 
@@ -171,7 +179,7 @@ SQLite 部署限定为单 API 副本；需要水平扩容前应先迁移 Postgre
 - 飞书、钉钉、GitLab 的真实双向同步、Jira OAuth/双向写回，以及 GitHub Webhook 增量同步
 - Webhook、幂等、失败重试和连接器可观测性
 - AI 评测集、建议反馈闭环和项目级知识库
-- E2E 测试、迁移工具和正式部署手册
+- 数据库迁移工具和多环境正式部署手册
 
 ## 许可证
 
